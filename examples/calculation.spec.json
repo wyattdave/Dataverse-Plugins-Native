@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "adapter.spec/v1",
+  "kind": "function",
+  "identity": {
+    "uniqueName": "sample_CalculateFee",
+    "displayName": "Calculate fee"
+  },
+  "binding": "unbound",
+  "solution": {
+    "uniqueName": "sample_AdapterLab",
+    "publisherPrefix": "sample"
+  },
+  "parameters": [
+    { "name": "Amount", "direction": "input", "type": "Decimal" },
+    { "name": "Rate", "direction": "input", "type": "Decimal" },
+    { "name": "Fee", "direction": "output", "type": "Decimal" }
+  ],
+  "formula": {
+    "text": "Amount * Rate",
+    "dialect": "dataverse-function",
+    "locale": "en-US",
+    "lineEndings": "lf"
+  },
+  "tableReferences": [],
+  "connectionReferences": []
+}

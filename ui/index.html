@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dv-native · low-code plug-ins</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">dv-native <span id="tool-version" class="muted"></span></div>
+      <nav class="stepper" aria-label="Steps">
+        <button type="button" class="step active" data-step="1"><span>1</span> Function</button>
+        <button type="button" class="step" data-step="2"><span>2</span> Check <em id="check-badge" class="badge">–</em></button>
+        <button type="button" class="step" data-step="3"><span>3</span> Environment</button>
+        <button type="button" class="step" data-step="4"><span>4</span> Deploy</button>
+      </nav>
+      <button type="button" id="btn-theme" class="ghost" title="Toggle light/dark mode">◐</button>
+    </header>
+
+    <main>
+      <section class="panel" id="panel-1" aria-label="Create or load a function">
+        <div class="toolbar">
+          <button type="button" id="btn-new-instant">New instant</button>
+          <button type="button" id="btn-new-automated">New automated</button>
+          <button type="button" id="btn-open">Open…</button>
+          <input type="file" id="file-input" accept=".json,application/json" hidden />
+          <select id="example-select" aria-label="Load example"><option value="">Load example…</option></select>
+          <span class="spacer"></span>
+          <button type="button" id="btn-download">Save JSON</button>
+          <button type="button" id="btn-toggle-json" class="ghost">View JSON</button>
+        </div>
+        <p id="load-error" class="error" role="alert" hidden></p>
+
+        <form id="spec-form" autocomplete="off" novalidate>
+          <fieldset>
+            <legend>Plug-in</legend>
+            <div class="kind" role="radiogroup" aria-label="Kind">
+              <label><input type="radio" name="kind" value="instant" checked /> Instant <small>(Function, called on demand)</small></label>
+              <label><input type="radio" name="kind" value="automated" /> Automated <small>(runs on a table event)</small></label>
+            </div>
+            <div class="grid">
+              <label>Display name <input name="displayName" required /></label>
+              <label>Unique name <input name="uniqueName" required placeholder="prefix_Name" /></label>
+              <label class="wide">Description <input name="description" /></label>
+            </div>
+          </fieldset>
+
+          <fieldset id="instant-fields">
+            <legend>Parameters</legend>
+            <table class="params">
+              <thead><tr><th>Name</th><th>Direction</th><th>Type</th><th><span class="visually-hidden">Remove</span></th></tr></thead>
+              <tbody id="param-rows"></tbody>
+            </table>
+            <button type="button" id="btn-add-param">Add parameter</button>
+            <p class="hint">Return outputs as a record, for example <code>{ Fee: Amount * Rate }</code>.</p>
+          </fieldset>
+
+          <fieldset id="automated-fields" hidden>
+            <legend>Trigger</legend>
+            <div class="grid">
+              <label>Table (logical name) <input name="triggerTable" placeholder="account" /></label>
+              <label>When the row is <select name="triggerMessage"></select></label>
+              <label>Run <select name="triggerStage"></select></label>
+            </div>
+            <p class="hint">Use <code>NewRecord</code> (and <code>OldRecord</code> on update) to read the row.</p>
+          </fieldset>
+
+          <fieldset class="formula">
+            <legend>Formula (Power Fx)</legend>
+            <textarea id="formula" name="formula" spellcheck="false" rows="12"></textarea>
+            <div class="hint"><span id="cursor-pos">Ln 1, Col 1</span> · <label class="inline">Tables used <input name="tables" placeholder="account, contact" /></label></div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Solution</legend>
+            <div class="grid">
+              <label>Solution unique name <input name="solutionUniqueName" /></label>
+              <label>Solution display name <input name="solutionDisplayName" /></label>
+              <label>Version <input name="solutionVersion" placeholder="1.0.0.0" /></label>
+              <label>Publisher unique name <input name="publisherUniqueName" /></label>
+              <label>Publisher prefix <input name="publisherPrefix" /></label>
+              <label>Option value prefix <input name="publisherOptionValuePrefix" inputmode="numeric" /></label>
+            </div>
+            <p class="hint">Use your existing publisher's exact values; the import fails if they don't match the environment.</p>
+          </fieldset>
+        </form>
+        <pre id="json-view" class="json" hidden></pre>
+        <div class="nav"><button type="button" class="primary" data-goto="2">Next: check →</button></div>
+      </section>
+
+      <section class="panel" id="panel-2" aria-label="Check syntax" hidden>
+        <div class="toolbar">
+          <button type="button" id="btn-check" class="primary">Check now</button>
+          <span id="check-status" class="muted"></span>
+        </div>
+        <ul id="issue-list" class="issues"></ul>
+        <p class="hint">Offline syntax and structure check. It does not run the formula; the environment compiles it during deploy.</p>
+        <div class="nav"><button type="button" data-goto="1">← Back</button><button type="button" class="primary" data-goto="3">Next: environment →</button></div>
+      </section>
+
+      <section class="panel" id="panel-3" aria-label="Select environment" hidden>
+        <div class="toolbar">
+          <button type="button" id="btn-refresh">Refresh</button>
+          <button type="button" id="btn-login">Sign in with pac…</button>
+          <span id="pac-status" class="muted"></span>
+        </div>
+        <h3>Profiles</h3>
+        <ul id="profile-list" class="cards"></ul>
+        <h3>Environments</h3>
+        <ul id="env-list" class="cards"></ul>
+        <p class="hint">Uses the Power Platform CLI sign-in. Deploy asks you to confirm the environment.</p>
+        <div class="nav"><button type="button" data-goto="2">← Back</button><button type="button" class="primary" data-goto="4">Next: deploy →</button></div>
+      </section>
+
+      <section class="panel" id="panel-4" aria-label="Deploy" hidden>
+        <dl id="deploy-summary" class="summary"></dl>
+        <div class="toolbar">
+          <button type="button" id="btn-deploy" class="primary">Deploy…</button>
+          <span id="deploy-status" class="muted"></span>
+        </div>
+        <ol id="deploy-steps" class="steps"></ol>
+        <div class="nav"><button type="button" data-goto="3">← Back</button></div>
+      </section>
+    </main>
+
+    <dialog id="confirm-dialog">
+      <form method="dialog">
+        <h3>Deploy to this environment?</h3>
+        <p id="confirm-text"></p>
+        <p class="hint">The solution is imported as unmanaged. Existing components with the same names are updated.</p>
+        <div class="nav">
+          <button value="cancel">Cancel</button>
+          <button value="confirm" class="primary">Deploy</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

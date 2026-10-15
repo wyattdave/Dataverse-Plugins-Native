@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "dv-native.plugin/v1",
+  "kind": "automated",
+  "uniqueName": "sample_AccountNameRequired",
+  "displayName": "Account name required",
+  "description": "Blocks account creation without a name.",
+  "solution": {
+    "uniqueName": "SampleLowCodePlugins",
+    "displayName": "Sample low-code plug-ins",
+    "version": "1.0.0.0",
+    "publisher": {
+      "uniqueName": "SamplePublisher",
+      "displayName": "Sample publisher",
+      "prefix": "sample",
+      "optionValuePrefix": 10000
+    }
+  },
+  "trigger": { "table": "account", "message": "Create", "stage": "preOperation" },
+  "tables": ["account"],
+  "formula": "If(IsBlank(NewRecord.name), Error({ Kind: ErrorKind.Validation, Message: \"Account name is required.\" }))"
+}

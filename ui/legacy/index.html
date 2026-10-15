@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>dv-native · Dataverse Functions adapter</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">dv-native <span id="tool-version" class="muted"></span></div>
+      <div class="banner" role="note">
+        Phase 1 · read-only · native writes, invocations and package operations are <strong>blocked</strong>
+      </div>
+      <div id="session-status" class="session">Connecting…</div>
+    </header>
+
+    <main class="layout">
+      <section class="panel documents" aria-label="Documents">
+        <div class="tabs" role="tablist" id="doc-tabs"></div>
+
+        <div class="toolbar">
+          <button type="button" id="btn-open" title="Open a JSON file from disk (read in the browser only)">Open file…</button>
+          <input type="file" id="file-input" accept=".json,application/json,.txt,text/plain" hidden />
+          <select id="example-select" aria-label="Load example"></select>
+          <button type="button" id="btn-new">New spec</button>
+          <button type="button" id="btn-format" title="Re-indent without changing any values">Format</button>
+          <button type="button" id="btn-download">Download</button>
+          <button type="button" id="btn-clear">Clear</button>
+          <span class="spacer"></span>
+          <div class="segmented" id="spec-view" role="group" aria-label="Spec editor view">
+            <button type="button" data-view="form">Form</button>
+            <button type="button" data-view="json">JSON</button>
+          </div>
+        </div>
+        <p id="doc-hint" class="hint"></p>
+
+        <form id="spec-form" class="spec-form" autocomplete="off" novalidate>
+          <div id="spec-form-error" class="form-error" role="alert" hidden></div>
+          <fieldset id="spec-fields">
+            <fieldset>
+              <legend>Identity</legend>
+              <div class="grid">
+                <label>Unique name <input name="uniqueName" placeholder="sample_CalculateFee" /></label>
+                <label>Display name <input name="displayName" placeholder="Calculate fee" /></label>
+                <label>Solution unique name <input name="solutionUniqueName" placeholder="sample_AdapterLab" /></label>
+                <label>Publisher prefix <input name="publisherPrefix" placeholder="sample" /></label>
+                <label>Kind
+                  <select name="kind">
+                    <option value="function">function</option>
+                    <option value="automated">automated (not supported yet)</option>
+                  </select>
+                </label>
+                <label>Binding
+                  <select name="binding"><option value="unbound">unbound</option></select>
+                </label>
+              </div>
+            </fieldset>
+
+            <fieldset>
+              <legend>Parameters</legend>
+              <table class="params">
+                <thead>
+                  <tr><th>Name</th><th>Direction</th><th>Type</th><th><span class="visually-hidden">Remove</span></th></tr>
+                </thead>
+                <tbody id="param-rows"></tbody>
+              </table>
+              <button type="button" id="btn-add-param">Add parameter</button>
+              <p class="hint">MVP profile: Decimal only, at least one output. Other documented types are accepted by the schema but rejected by policy.</p>
+            </fieldset>
+
+            <fieldset class="formula">
+              <legend>Formula (Power Fx)</legend>
+              <div class="formula-toolbar">
+                <label>Locale <input name="locale" size="7" placeholder="en-US" /></label>
+                <label>Line endings
+                  <select name="lineEndings">
+                    <option value="lf">lf (normalize CRLF/CR)</option>
+                    <option value="preserve">preserve</option>
+                  </select>
+                </label>
+                <button type="button" id="btn-open-formula">Open formula file…</button>
+                <input type="file" id="formula-file-input" accept=".fx,.pfx,.txt,text/plain" hidden />
+              </div>
+              <div class="code-editor formula-editor" id="formula-editor"></div>
+              <p class="hint">Source is kept exactly as typed and only hashed. Nothing evaluates it: there is no local Power Fx runtime.</p>
+            </fieldset>
+
+            <fieldset>
+              <legend>References</legend>
+              <div class="grid">
+                <label>Table logical names <input name="tableReferences" placeholder="none (comma separated)" /></label>
+                <label>Connection references <input name="connectionReferences" placeholder="none (comma separated)" /></label>
+              </div>
+              <p class="hint">The MVP profile allows no table or connection references.</p>
+            </fieldset>
+          </fieldset>
+        </form>
+
+        <div class="code-editor json-editor" id="json-editor"></div>
+        <div class="live-check" id="live-check" aria-live="polite"></div>
+      </section>
+
+      <section class="panel side" aria-label="Actions and results">
+        <div class="actions" id="actions"></div>
+        <div class="tabs result-tabs" role="tablist" id="result-tabs">
+          <button type="button" role="tab" data-pane="result" class="active">Result</button>
+          <button type="button" role="tab" data-pane="history">History</button>
+          <button type="button" role="tab" data-pane="capabilities">Capabilities</button>
+        </div>
+        <div class="pane" id="pane-result">
+          <p class="empty">Run an action to see its result. Typing only triggers an offline validate of the spec.</p>
+        </div>
+        <div class="pane" id="pane-history" hidden></div>
+        <div class="pane" id="pane-capabilities" hidden></div>
+      </section>
+    </main>
+  </body>
+</html>

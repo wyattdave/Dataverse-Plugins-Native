@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "dv-native.plugin/v1",
+  "kind": "instant",
+  "uniqueName": "sample_CalculateFee",
+  "displayName": "Calculate fee",
+  "description": "Returns Amount multiplied by Rate.",
+  "solution": {
+    "uniqueName": "SampleLowCodePlugins",
+    "displayName": "Sample low-code plug-ins",
+    "version": "1.0.0.0",
+    "publisher": {
+      "uniqueName": "SamplePublisher",
+      "displayName": "Sample publisher",
+      "prefix": "sample",
+      "optionValuePrefix": 10000
+    }
+  },
+  "parameters": [
+    { "name": "Amount", "direction": "input", "type": "Decimal" },
+    { "name": "Rate", "direction": "input", "type": "Decimal" },
+    { "name": "Fee", "direction": "output", "type": "Decimal" }
+  ],
+  "tables": [],
+  "formula": "{ Fee: Amount * Rate }"
+}
