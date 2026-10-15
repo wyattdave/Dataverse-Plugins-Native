@@ -1,6 +1,13 @@
-import { LOGICAL_NAME_PATTERN, PARAMETER_NAME_PATTERN, PUBLISHER_PREFIX_PATTERN, SOLUTION_UNIQUE_NAME_PATTERN, isReservedPrefix } from '../contracts/patterns.js';
-import { arr, int, lit, obj, str, validateSchema, type Schema } from '../contracts/schema.js';
+import { arr, int, lit, obj, str, validateSchema, type Schema } from '../core/schema.js';
 import { parseStrictJson, StrictJsonError } from '../core/strictJson.js';
+
+export const PUBLISHER_PREFIX_PATTERN = /^[a-z][a-z0-9]{1,7}$/;
+export const SOLUTION_UNIQUE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+export const PARAMETER_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,99}$/;
+export const LOGICAL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** Microsoft-owned publisher prefixes. */
+const isReservedPrefix = (prefix: string): boolean => /^ms/.test(prefix) || prefix === 'adx';
 
 export const PLUGIN_SCHEMA_VERSION = 'dv-native.plugin/v1';
 
@@ -121,12 +128,7 @@ export function parsePluginSpec(text: string): SpecParse {
     const reason = error instanceof StrictJsonError ? error.code : 'JSON_INVALID';
     return { spec: undefined, issues: [{ severity: 'error', code: reason, message: 'The spec is not valid JSON.' }] };
   }
-  const issues: Issue[] = validateSchema(value, schema).map((d) => ({
-    severity: 'error',
-    code: d.code,
-    message: d.message,
-    ...(d.path !== undefined ? { path: d.path } : {}),
-  }));
+  const issues: Issue[] = validateSchema(value, schema).map((d) => ({ severity: 'error', code: d.code, message: d.message, path: d.path }));
   if (issues.length > 0) {
     return { spec: undefined, issues };
   }

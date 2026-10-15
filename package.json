@@ -2,7 +2,7 @@
   "name": "dv-native",
   "version": "0.1.0",
   "private": true,
-  "description": "Build and deploy Dataverse low-code plug-ins (instant Functions and automated plug-ins) via the Power Platform CLI; plus the Phase 1 read-only planning adapter.",
+  "description": "Build and deploy Dataverse low-code plug-ins (instant Functions and automated plug-ins) via the Power Platform CLI, from a CLI, an agent, or a local UI.",
   "license": "UNLICENSED",
   "type": "module",
   "engines": {
@@ -11,8 +11,6 @@
   "bin": {
     "dv-native": "dist/src/cli/main.js"
   },
-  "main": "dist/src/index.js",
-  "types": "dist/src/index.d.ts",
   "files": [
     "dist/src",
     "ui",

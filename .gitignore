@@ -2,16 +2,5 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Private adapter state: target configs, journals, snapshots, plans, approvals, captures.
-# Only synthetic, redaction-tested examples under examples/ are commit-ready.
+# Your own plug-in specs, formulas and build output.
 private/
-.dv-native/
-*.private.json
-*.journal.json
-*.lease.json
-*.har
-plans/
-snapshots/
-approvals/
-captures/
-!examples/*.json

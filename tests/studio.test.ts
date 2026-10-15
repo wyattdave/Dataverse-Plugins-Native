@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
-import { checkFormula } from '../../src/studio/fxCheck.js';
-import { checkSpecText, deploy } from '../../src/studio/deploy.js';
-import { PacClient, normalizeEnvironmentUrl, parseAuthList, parseEnvList, parseFetchGuids, type PacRunner } from '../../src/studio/pac.js';
-import { buildSolutionFiles, defaultStepId, deterministicGuid } from '../../src/studio/solution.js';
-import { parsePluginSpec, type PluginSpec } from '../../src/studio/spec.js';
-import { cli, clone, examplePath, tempDir } from '../helpers.js';
+import { checkFormula } from '../src/studio/fxCheck.js';
+import { checkSpecText, deploy, findEnvironment } from '../src/studio/deploy.js';
+import { PacClient, normalizeEnvironmentUrl, parseAuthList, parseEnvList, parseFetchGuids, type PacRunner } from '../src/studio/pac.js';
+import { buildSolutionFiles, defaultStepId, deterministicGuid } from '../src/studio/solution.js';
+import { parsePluginSpec, type PluginSpec } from '../src/studio/spec.js';
+import { cli, clone, examplePath, tempDir } from './helpers.js';
 
 const readSpec = async (name: string): Promise<PluginSpec> => JSON.parse(await readFile(examplePath(name), 'utf8')) as PluginSpec;
 const withFormula = (spec: PluginSpec, formula: string): PluginSpec => ({ ...clone(spec), formula });
@@ -193,7 +193,7 @@ describe('pac output parsing', () => {
 describe('deploy (fake pac)', () => {
   it('checks, packs and imports an instant plug-in into a listed sandbox', async () => {
     const { runner, calls } = fakePac();
-    const result = await deploy({ specText: await readFile(examplePath('instant.plugin.json'), 'utf8'), environmentUrl: ENV_URL, pac: new PacClient(runner) });
+    const result = await deploy({ specText: await readFile(examplePath('instant.plugin.json'), 'utf8'), environment: ENV_URL, pac: new PacClient(runner) });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     assert.deepEqual(result.steps.map((s) => s.step), ['check', 'environment', 'pack', 'import']);
     assert.deepEqual(calls.map((c) => `${c[0]} ${c[1]}`), ['env list', 'solution pack', 'solution import']);
@@ -206,7 +206,7 @@ describe('deploy (fake pac)', () => {
     const existing = 'abcdefab-1234-4abc-8abc-abcdefabcdef';
     const dir = await tempDir();
     const { runner } = fakePac({ 'fetch step': { code: 0, output: `sdkmessageprocessingstepid\n${existing}\n` } });
-    const result = await deploy({ specText: await readFile(examplePath('automated.plugin.json'), 'utf8'), environmentUrl: ENV_URL, pac: new PacClient(runner), outDir: dir });
+    const result = await deploy({ specText: await readFile(examplePath('automated.plugin.json'), 'utf8'), environment: ENV_URL, pac: new PacClient(runner), outDir: dir });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     const step = await readFile(join(dir, 'solution', 'SdkMessageProcessingSteps', `{${existing}}.xml`), 'utf8');
     assert.match(step, /<SdkMessageId>9ebdbb1b-ea3e-db11-86a7-000a3a5473e8<\/SdkMessageId>/);
@@ -216,7 +216,7 @@ describe('deploy (fake pac)', () => {
     const { runner, calls } = fakePac({
       'fetch step': { code: 0, output: 'sdkmessageprocessingstepid\naaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\nbbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\n' },
     });
-    const result = await deploy({ specText: await readFile(examplePath('automated.plugin.json'), 'utf8'), environmentUrl: ENV_URL, pac: new PacClient(runner) });
+    const result = await deploy({ specText: await readFile(examplePath('automated.plugin.json'), 'utf8'), environment: ENV_URL, pac: new PacClient(runner) });
     assert.equal(result.status, 'failed');
     assert.ok(!calls.some((c) => c[0] === 'solution'));
   });
@@ -224,10 +224,22 @@ describe('deploy (fake pac)', () => {
   it('deploys to production environments listed by pac', async () => {
     const { runner, calls } = fakePac();
     const spec = await readFile(examplePath('instant.plugin.json'), 'utf8');
-    const result = await deploy({ specText: spec, environmentUrl: 'https://contoso.crm.dynamics.com/', pac: new PacClient(runner) });
+    const result = await deploy({ specText: spec, environment: 'https://contoso.crm.dynamics.com/', pac: new PacClient(runner) });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     assert.equal(result.environment?.type, 'Production');
     assert.ok(calls.some((c) => c[0] === 'solution' && c[1] === 'import'));
+  });
+
+  it('finds environments by URL, id or display name, and refuses ambiguous names', async () => {
+    const { runner } = fakePac();
+    const { environments } = await new PacClient(runner).environments();
+    for (const value of [ENV_URL, 'https://Contoso-Dev.crm.dynamics.com', '11111111-2222-3333-4444-555555555555', 'contoso dev']) {
+      assert.equal((findEnvironment(environments, value) as { url: string }).url, ENV_URL, value);
+    }
+    assert.equal(findEnvironment(environments, 'Contoso'), 'none');
+    assert.equal(findEnvironment(environments, ' '), 'none');
+    const twins = [environments[0]!, { ...environments[0]!, url: 'https://twin.crm.dynamics.com/', id: 'x' }];
+    assert.equal(findEnvironment(twins, 'Contoso Dev'), 'ambiguous');
   });
 
   it('blocks unlisted environments and specs that fail the check without importing', async () => {
@@ -238,7 +250,7 @@ describe('deploy (fake pac)', () => {
       [ENV_URL, spec.replace('{ Fee: Amount * Rate }', '{ Fee: (Amount * Rate }')],
     ] as const) {
       const { runner, calls } = fakePac();
-      const result = await deploy({ specText, environmentUrl: url, pac: new PacClient(runner) });
+      const result = await deploy({ specText, environment: url, pac: new PacClient(runner) });
       assert.equal(result.status, 'blocked', url);
       assert.ok(!calls.some((c) => c[0] === 'solution'), url);
     }
@@ -247,26 +259,101 @@ describe('deploy (fake pac)', () => {
   it('reports pack and import failures', async () => {
     const spec = await readFile(examplePath('instant.plugin.json'), 'utf8');
     const { runner } = fakePac({ 'solution import': { code: 1, output: 'Error: publisher mismatch' } });
-    const result = await deploy({ specText: spec, environmentUrl: ENV_URL, pac: new PacClient(runner) });
+    const result = await deploy({ specText: spec, environment: ENV_URL, pac: new PacClient(runner) });
     assert.equal(result.status, 'failed');
     assert.match(result.steps.at(-1)!.detail, /publisher mismatch/);
   });
 });
 
-describe('studio CLI', () => {
-  it('new writes a starter spec once; check reports it as passing', async () => {
+describe('CLI (agent workflow)', () => {
+  const json = <T>(run: { stdout: string }): T => JSON.parse(run.stdout) as T;
+
+  it('new applies settings and loads the formula from a script file', async () => {
     const dir = await tempDir();
-    const path = join(dir, 'mine.plugin.json');
-    assert.equal((await cli(['new', '--kind', 'automated', '--out', path])).code, 0);
-    assert.equal((await cli(['new', '--kind', 'automated', '--out', path])).code, 3, 'never overwrites');
-    const checked = await cli(['check', '--spec', path, '--json']);
-    assert.equal(checked.code, 0);
-    assert.equal((JSON.parse(checked.stdout) as { ok: boolean }).ok, true);
+    const fx = join(dir, 'fee.fx');
+    await writeFile(fx, '\uFEFF{ Total: Price * Qty }\r\n', 'utf8');
+    const path = join(dir, 'fee.plugin.json');
+    const created = await cli([
+      'new', '--kind', 'instant', '--out', path, '--prefix', 'contoso', '--name', 'OrderTotal', '--display-name', 'Order total',
+      '--solution', 'ContosoPlugins', '--publisher', 'Contoso', '--params', 'Price:input:Decimal, Qty:input:Integer, Total:output:Decimal',
+      '--formula-file', fx, '--json',
+    ]);
+    assert.equal(created.code, 0, created.stdout);
+    assert.deepEqual(json<{ written: boolean; check: { ok: boolean } }>(created).check.ok, true);
+    const spec = JSON.parse(await readFile(path, 'utf8')) as PluginSpec;
+    assert.equal(spec.uniqueName, 'contoso_OrderTotal');
+    assert.equal(spec.solution.publisher.prefix, 'contoso');
+    assert.equal(spec.formula, '{ Total: Price * Qty }');
+    assert.deepEqual(spec.parameters?.map((p) => p.name), ['Price', 'Qty', 'Total']);
+    assert.equal((await cli(['new', '--kind', 'instant', '--out', path])).code, 3, 'never overwrites');
   });
 
-  it('rejects unknown arguments and missing options', async () => {
+  it('set updates a spec in place, renames on prefix change, and reports check issues', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'rule.plugin.json');
+    assert.equal((await cli(['new', '--kind', 'automated', '--out', path])).code, 0);
+    const updated = await cli(['set', '--spec', path, '--prefix', 'contoso', '--trigger-table', 'contact', '--message', 'Update', '--stage', 'postOperation', '--tables', 'none', '--json']);
+    assert.equal(updated.code, 0, updated.stdout);
+    const spec = JSON.parse(await readFile(path, 'utf8')) as PluginSpec;
+    assert.equal(spec.uniqueName, 'contoso_AccountNameRequired');
+    assert.deepEqual(spec.trigger, { table: 'contact', message: 'Update', stage: 'postOperation' });
+    assert.deepEqual(spec.tables, []);
+
+    const fx = join(dir, 'bad.fx');
+    await writeFile(fx, 'If(IsBlank(NewRecord.name), Error("x"', 'utf8');
+    const broken = await cli(['set', '--spec', path, '--formula-file', fx, '--json']);
+    assert.equal(broken.code, 0, 'the spec is still written');
+    assert.equal(json<{ check: { ok: boolean } }>(broken).check.ok, false);
+    const checked = await cli(['check', '--spec', path, '--json']);
+    assert.equal(checked.code, 3);
+    assert.ok(json<{ issues: { code: string; line?: number }[] }>(checked).issues.some((i) => i.line === 1));
+  });
+
+  it('rejects settings that do not fit, and returns errors as JSON', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'fee.plugin.json');
+    assert.equal((await cli(['new', '--kind', 'instant', '--out', path])).code, 0);
+    const before = await readFile(path, 'utf8');
+    for (const args of [
+      ['--trigger-table', 'account'],
+      ['--params', 'Amount:in:Decimal'],
+      ['--params', 'Amount:input:Money'],
+      ['--option-value-prefix', 'abc'],
+      ['--formula-file', join(dir, 'missing.fx')],
+      [],
+    ]) {
+      const run = await cli(['set', '--spec', path, ...args, '--json']);
+      assert.equal(run.code, 3, args.join(' '));
+      assert.equal(typeof json<{ error: string }>(run).error, 'string');
+    }
+    assert.equal(await readFile(path, 'utf8'), before, 'failed sets leave the file untouched');
+    await writeFile(join(dir, 'broken.json'), '{ "kind": ', 'utf8');
+    assert.equal((await cli(['set', '--spec', join(dir, 'broken.json'), '--name', 'X'])).code, 3);
+  });
+
+  it('lists environments and deploys by environment name through pac', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'fee.plugin.json');
+    assert.equal((await cli(['new', '--kind', 'instant', '--out', path])).code, 0);
+    const { runner, calls } = fakePac();
+    const envs = await cli(['envs', '--json'], runner);
+    assert.equal(envs.code, 0);
+    assert.deepEqual(json<{ environments: { name: string }[] }>(envs).environments.map((e) => e.name), ['Contoso Dev', 'Contoso Prod']);
+    const deployed = await cli(['deploy', '--spec', path, '--environment', 'Contoso Dev', '--json'], runner);
+    assert.equal(deployed.code, 0, deployed.stdout);
+    assert.equal(json<{ status: string }>(deployed).status, 'succeeded');
+    const importCall = calls.find((c) => c[0] === 'solution' && c[1] === 'import')!;
+    assert.equal(importCall[importCall.indexOf('--environment') + 1], ENV_URL);
+    assert.equal((await cli(['deploy', '--spec', path, '--environment', 'Nowhere'], fakePac().runner)).code, 2);
+  });
+
+  it('prints help and rejects unknown commands, arguments and missing options', async () => {
+    assert.match((await cli(['--help'])).stdout, /--formula-file/);
+    assert.match((await cli(['set', '--help'])).stdout, /--params/);
+    assert.equal((await cli(['apply'])).code, 3);
     assert.equal((await cli(['deploy', '--spec', 'x.json'])).code, 3);
     assert.equal((await cli(['deploy', '--spec', 'x.json', '--environment', ENV_URL, '--force'])).code, 3);
     assert.equal((await cli(['new', '--kind', 'other', '--out', 'x.json'])).code, 3);
+    assert.equal((await cli(['ui', '--port', '99999'])).code, 3);
   });
 });

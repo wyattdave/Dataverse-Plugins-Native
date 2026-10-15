@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { parseStrictJson, StrictJsonError } from '../../src/core/strictJson.js';
+import { parseStrictJson, StrictJsonError } from '../src/core/strictJson.js';
 
 function code(text: string): string | undefined {
   try {

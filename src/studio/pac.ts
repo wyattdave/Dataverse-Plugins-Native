@@ -1,5 +1,23 @@
 import { spawn } from 'node:child_process';
-import { redactText } from '../core/redact.js';
+
+const REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\b(authorization|proxy-authorization|cookie|set-cookie)(\s*["']?\s*:\s*)[^\r\n]*/gi, '$1$2[REDACTED]'],
+  [/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]'],
+  [/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/g, '[REDACTED_JWT]'],
+  [
+    /\b(client_secret|client_assertion|access_token|refresh_token|id_token|password|pwd|code_verifier|x-ms-client-secret|sig)(\s*["']?\s*[:=]\s*["']?)[^\s"',;&]*/gi,
+    '$1$2[REDACTED]',
+  ],
+];
+
+/** Keeps tokens and secrets that pac might print out of anything this tool shows or returns. */
+export function redactText(text: string, maxLength: number): string {
+  let out = text;
+  for (const [pattern, replacement] of REDACTIONS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out.length > maxLength ? `${out.slice(0, maxLength)}…[TRUNCATED]` : out;
+}
 
 /**
  * Thin wrapper over the Power Platform CLI (pac). pac owns sign-in and token storage; this tool never sees tokens.

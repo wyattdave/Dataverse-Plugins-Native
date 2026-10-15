@@ -4,14 +4,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DOCUMENT_KINDS, OPERATIONS, runOperation } from '../app/operations.js';
-import { CAPABILITY_REGISTRY } from '../contracts/capability.js';
-import type { ReasonCode } from '../contracts/reasonCodes.js';
-import type { CommandResult } from '../contracts/result.js';
-import { bool, int, obj, str, validateSchema, type Schema } from '../contracts/schema.js';
-import { DEFAULT_MAX_INPUT_BYTES } from '../core/documents.js';
-import { buildResult } from '../core/result.js';
-import { parseStrictJson, StrictJsonError } from '../core/strictJson.js';
+import { int, obj, str, validateSchema, type Schema } from '../core/schema.js';
+import { parseStrictJson } from '../core/strictJson.js';
 import { checkSpecText, deploy } from '../studio/deploy.js';
 import { createPacRunner, normalizeEnvironmentUrl, PacClient, PacNotFoundError, lastLines, pacError, type PacRunner } from '../studio/pac.js';
 import { PARAMETER_TYPES, TRIGGER_MESSAGES, TRIGGER_STAGES } from '../studio/spec.js';
@@ -27,19 +21,11 @@ const STATIC_FILES: Readonly<Record<string, { file: string; type: string }>> = {
   '/styles.css': { file: 'styles.css', type: 'text/css; charset=utf-8' },
 };
 
-/** Synthetic, commit-safe examples only; the server never reads user-supplied paths. */
-export const EXAMPLE_FILES = [
-  'instant.plugin.json',
-  'automated.plugin.json',
-  'calculation.spec.json',
-  'synthetic.target.json',
-  'target.template.json',
-  'converged.snapshot.json',
-  'drifted.snapshot.json',
-  'interrupted.journal.json',
-] as const;
+/** Commit-safe example specs only; the server never reads user-supplied paths. */
+export const EXAMPLE_FILES = ['instant.plugin.json', 'automated.plugin.json'] as const;
 
-const MAX_BODY_BYTES = DOCUMENT_KINDS.length * DEFAULT_MAX_INPUT_BYTES * 2;
+const MAX_SPEC_BYTES = 1024 * 1024;
+const MAX_BODY_BYTES = MAX_SPEC_BYTES * 2;
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
@@ -52,17 +38,7 @@ const CONTENT_SECURITY_POLICY = [
   "frame-ancestors 'none'",
 ].join('; ');
 
-const documentText = () => str({ maxLength: DEFAULT_MAX_INPUT_BYTES });
-const runRequestSchema: Schema = obj(
-  {
-    operation: str({ enum: Object.keys(OPERATIONS) }),
-    documents: obj(Object.fromEntries(DOCUMENT_KINDS.map((k) => [k, documentText()])), DOCUMENT_KINDS),
-    offline: bool(),
-  },
-  ['offline'],
-);
-
-const specText = () => str({ minLength: 1, maxLength: DEFAULT_MAX_INPUT_BYTES });
+const specText = () => str({ minLength: 1, maxLength: MAX_SPEC_BYTES });
 const checkRequestSchema: Schema = obj({ spec: specText() });
 const selectRequestSchema: Schema = obj({ index: int({ min: 1, max: 999 }) });
 const deployRequestSchema: Schema = obj({
@@ -73,7 +49,6 @@ const deployRequestSchema: Schema = obj({
 
 export interface UiServerOptions {
   port?: number;
-  now?: () => Date;
   /** Runs the Power Platform CLI; tests inject a fake. */
   pacRunner?: PacRunner;
 }
@@ -91,7 +66,6 @@ export interface UiServer {
  * (DNS-rebinding defence), and a same-origin Origin when present. Request bodies are never logged or persisted.
  */
 export async function startUiServer(options: UiServerOptions = {}): Promise<UiServer> {
-  const now = options.now ?? (() => new Date());
   const pac = new PacClient(options.pacRunner ?? createPacRunner());
   let pacBusy = false;
   const token = randomBytes(32).toString('hex');
@@ -124,8 +98,8 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(body));
   };
-  const sendFailure = (res: ServerResponse, status: number, code: ReasonCode, extra: Partial<CommandResult> = {}): void => {
-    sendJson(res, status, { ...buildResult('ui', { status: 'failed', reasonCodes: [code] }, now()), ...extra });
+  const sendFailure = (res: ServerResponse, status: number, error: string, extra: Record<string, unknown> = {}): void => {
+    sendJson(res, status, { error, ...extra });
   };
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -138,7 +112,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     res.setHeader('Cache-Control', 'no-store');
 
     if (!allowedHosts().has(req.headers.host ?? '')) {
-      sendFailure(res, 421, 'UI_HOST_REJECTED');
+      sendFailure(res, 421, 'Host not allowed.');
       return;
     }
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`);
@@ -157,23 +131,11 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
 
     const origin = req.headers.origin;
     if (origin !== undefined && !allowedOrigins().has(origin)) {
-      sendFailure(res, 403, 'UI_ORIGIN_REJECTED');
+      sendFailure(res, 403, 'Origin not allowed.');
       return;
     }
     if (!tokenMatches(req.headers['x-dv-session'])) {
-      sendFailure(res, 401, 'UI_SESSION_INVALID');
-      return;
-    }
-
-    if (req.method === 'GET' && url.pathname === '/api/meta') {
-      sendJson(res, 200, {
-        tool: { name: TOOL_NAME, version: TOOL_VERSION },
-        operations: OPERATIONS,
-        documentKinds: DOCUMENT_KINDS,
-        capabilities: CAPABILITY_REGISTRY,
-        examples: EXAMPLE_FILES,
-        limits: { maxDocumentBytes: DEFAULT_MAX_INPUT_BYTES },
-      });
+      sendFailure(res, 401, 'Session token missing or invalid.');
       return;
     }
 
@@ -181,26 +143,10 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
       const name = decodeURIComponent(url.pathname.slice('/api/examples/'.length));
       const content = examples.get(name);
       if (content === undefined) {
-        sendFailure(res, 404, 'UI_NOT_FOUND');
+        sendFailure(res, 404, 'Not found.');
         return;
       }
       sendJson(res, 200, { name, content });
-      return;
-    }
-
-    if (req.method === 'POST' && url.pathname === '/api/run') {
-      const parsed = await readJsonRequest(req, res, runRequestSchema);
-      if (parsed === undefined) {
-        return;
-      }
-      const request = parsed as { operation: string; documents: Record<string, string>; offline?: boolean };
-      const result = await runOperation({
-        operation: request.operation,
-        documents: request.documents,
-        ...(request.offline !== undefined ? { offline: request.offline } : {}),
-        now: now(),
-      });
-      sendJson(res, 200, result);
       return;
     }
 
@@ -209,39 +155,38 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
       return;
     }
 
-    sendFailure(res, 404, 'UI_NOT_FOUND');
+    sendFailure(res, 404, 'Not found.');
   };
 
   /** Reads and strictly validates a JSON body; on failure the response has already been sent. */
   const readJsonRequest = async (req: IncomingMessage, res: ServerResponse, schema: Schema): Promise<unknown> => {
     if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
-      sendFailure(res, 415, 'UI_UNSUPPORTED_MEDIA_TYPE');
+      sendFailure(res, 415, 'Content-Type must be application/json.');
       return undefined;
     }
     const declared = Number(req.headers['content-length'] ?? '0');
     if (declared > MAX_BODY_BYTES) {
       res.setHeader('Connection', 'close');
-      sendFailure(res, 413, 'UI_REQUEST_TOO_LARGE');
+      sendFailure(res, 413, 'Request too large.');
       req.resume();
       return undefined;
     }
     const body = await readBody(req, MAX_BODY_BYTES);
     if (body === undefined) {
       res.setHeader('Connection', 'close');
-      sendFailure(res, 413, 'UI_REQUEST_TOO_LARGE');
+      sendFailure(res, 413, 'Request too large.');
       return undefined;
     }
     let parsed: unknown;
     try {
       parsed = parseStrictJson(new TextDecoder('utf-8', { fatal: true }).decode(body));
-    } catch (error) {
-      const code = error instanceof StrictJsonError ? error.code : 'UI_REQUEST_INVALID';
-      sendFailure(res, 400, 'UI_REQUEST_INVALID', { reasonCodes: ['UI_REQUEST_INVALID', code] });
+    } catch {
+      sendFailure(res, 400, 'Request is not valid JSON.');
       return undefined;
     }
     const problems = validateSchema(parsed, schema);
     if (problems.length > 0) {
-      sendFailure(res, 400, 'UI_REQUEST_INVALID', { diagnostics: problems });
+      sendFailure(res, 400, 'Request is invalid.', { problems });
       return undefined;
     }
     return parsed;
@@ -271,7 +216,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
         parameterTypes: PARAMETER_TYPES,
         messages: TRIGGER_MESSAGES,
         stages: Object.keys(TRIGGER_STAGES),
-        examples: EXAMPLE_FILES.filter((name) => name.endsWith('.plugin.json')),
+        examples: EXAMPLE_FILES,
       });
       return;
     }
@@ -323,16 +268,16 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
         sendJson(res, 400, { error: 'Deploy needs the environment URL confirmed exactly.' });
         return;
       }
-      await withPac(res, () => deploy({ specText: body.spec, environmentUrl: target, pac }));
+      await withPac(res, () => deploy({ specText: body.spec, environment: target, pac }));
       return;
     }
-    sendFailure(res, 404, 'UI_NOT_FOUND');
+    sendFailure(res, 404, 'Not found.');
   };
 
   const server = createServer((req, res) => {
     handle(req, res).catch(() => {
       if (!res.headersSent) {
-        sendFailure(res, 500, 'INTERNAL_ERROR');
+        sendFailure(res, 500, 'Internal error.');
       } else {
         res.end();
       }

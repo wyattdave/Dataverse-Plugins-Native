@@ -1,9 +1,13 @@
-import { escapePointer, type JsonObject, type JsonValue } from '../contracts/common.js';
-import type { ReasonCode } from '../contracts/reasonCodes.js';
+import { escapePointer } from './schema.js';
+
+export type JsonValue = null | boolean | number | string | JsonValue[] | JsonObject;
+export interface JsonObject {
+  [key: string]: JsonValue;
+}
 
 export class StrictJsonError extends Error {
   constructor(
-    readonly code: ReasonCode,
+    readonly code: string,
     message: string,
     readonly path: string,
     readonly offset: number,
@@ -18,7 +22,7 @@ export interface StrictJsonOptions {
 }
 
 /**
- * RFC 8259 parser with adapter restrictions: duplicate keys, non-integer numbers,
+ * RFC 8259 parser with extra restrictions: duplicate keys, non-integer numbers,
  * unsafe integers, negative zero, and unpaired surrogates are rejected.
  */
 export function parseStrictJson(text: string, options: StrictJsonOptions = {}): JsonValue {
@@ -62,7 +66,7 @@ class StrictParser {
     return value;
   }
 
-  private error(code: ReasonCode, message: string, path: string): StrictJsonError {
+  private error(code: string, message: string, path: string): StrictJsonError {
     return new StrictJsonError(code, `${message} (offset ${this.i})`, path, this.i);
   }
 
@@ -259,7 +263,7 @@ class StrictParser {
     if (match[1] !== undefined || match[2] !== undefined || text === '-0') {
       throw this.error(
         'JSON_UNSUPPORTED_NUMBER',
-        'Contract v1 numbers must be integers without fraction, exponent, or negative zero.',
+        'Numbers must be integers without fraction, exponent, or negative zero.',
         path,
       );
     }

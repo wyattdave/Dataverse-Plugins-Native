@@ -47,10 +47,22 @@ export interface DeployResult {
 
 export interface DeployOptions {
   specText: string;
-  environmentUrl: string;
+  /** Environment URL, display name or id, as listed by `pac env list`. */
+  environment: string;
   pac: PacClient;
   /** Keep the generated solution folder and zip here instead of a temp folder that is removed afterwards. */
   outDir?: string;
+}
+
+/** Exactly one listed environment must match the URL, id or (case-insensitive) display name. */
+export function findEnvironment(environments: readonly PacEnvironment[], value: string): PacEnvironment | 'none' | 'ambiguous' {
+  const url = normalizeEnvironmentUrl(value);
+  const key = value.trim().toLowerCase();
+  if (key.length === 0) {
+    return 'none';
+  }
+  const matches = environments.filter((e) => (url !== undefined && e.url === url) || e.id === key || e.name.toLowerCase() === key);
+  return matches.length === 1 ? matches[0]! : matches.length === 0 ? 'none' : 'ambiguous';
 }
 
 const fetchXml = (entity: string, attribute: string, filter: string, link = ''): string =>
@@ -105,18 +117,21 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const spec = checked.spec;
   steps.push({ step: 'check', status: 'done', detail: `${checked.issues.length} warning(s).` });
 
-  const url = normalizeEnvironmentUrl(options.environmentUrl);
-  if (url === undefined) {
-    steps.push({ step: 'environment', status: 'blocked', detail: 'Environment must be a Dataverse https URL.' });
+  const { environments, result: listResult } = await options.pac.environments();
+  if (listResult.code !== 0) {
+    steps.push({ step: 'environment', status: 'blocked', detail: `pac env list failed: ${pacError(listResult.output)}` });
     return result('blocked', undefined, checked.issues);
   }
-  const { environments, result: listResult } = await options.pac.environments();
-  const environment = environments.find((e) => e.url === url);
-  if (environment === undefined) {
-    const detail = listResult.code === 0 ? 'Environment is not available to the active pac profile.' : `pac env list failed: ${pacError(listResult.output)}`;
+  const environment = findEnvironment(environments, options.environment);
+  if (typeof environment === 'string') {
+    const detail =
+      environment === 'ambiguous'
+        ? 'More than one environment matches; use the environment URL.'
+        : 'Environment is not available to the active pac profile (use a URL, name or id from envs).';
     steps.push({ step: 'environment', status: 'blocked', detail });
     return result('blocked', undefined, checked.issues);
   }
+  const url = environment.url;
   steps.push({ step: 'environment', status: 'done', detail: `${environment.name || environment.url} (type: ${environment.type}).` });
 
   const workDir = options.outDir ?? (await mkdtemp(join(tmpdir(), 'dv-native-')));
@@ -155,21 +170,4 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       await rm(workDir, { recursive: true, force: true });
     }
   }
-}
-
-/** Offline build (no environment): automated plug-ins use well-known message ids for Create and Update only. */
-export const WELL_KNOWN_MESSAGE_IDS: Readonly<Record<string, string>> = {
-  Create: '9ebdbb1b-ea3e-db11-86a7-000a3a5473e8',
-  Update: '20bebb1b-ea3e-db11-86a7-000a3a5473e8',
-};
-
-export function offlineBinding(spec: PluginSpec): AutomatedBinding | undefined {
-  if (spec.kind !== 'automated') {
-    return undefined;
-  }
-  const sdkMessageId = WELL_KNOWN_MESSAGE_IDS[spec.trigger!.message];
-  if (sdkMessageId === undefined) {
-    throw new Error(`Offline build cannot resolve the "${spec.trigger!.message}" message id; deploy resolves it from the environment.`);
-  }
-  return { sdkMessageId, stepId: defaultStepId(spec) };
 }
