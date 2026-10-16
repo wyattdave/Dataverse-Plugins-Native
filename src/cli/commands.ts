@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { SignInRequiredError, type Auth, type ProfileView } from '../studio/auth.js';
+import type { DataverseClient } from '../studio/dataverse.js';
 import { checkSpecText, deploy, type DeployResult } from '../studio/deploy.js';
-import { lastLines, pacError, PacClient, type PacRunner } from '../studio/pac.js';
 import { applySettings, SETTING_NAMES, SETTING_OPTIONS } from '../studio/settings.js';
 import { starterSpec, type Issue } from '../studio/spec.js';
 import { isPlainObject } from '../core/schema.js';
@@ -40,19 +41,25 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     usage: 'check --spec <file> [--json]',
     summary: 'Check the spec and the Power Fx syntax offline.',
   },
-  login: { values: [], flags: ['--json'], required: [], usage: 'login [--json]', summary: 'Sign in through pac (opens a browser for the user).' },
+  login: {
+    values: [],
+    flags: ['--json', '--select-account'],
+    required: [],
+    usage: 'login [--select-account] [--json]',
+    summary: 'Sign in through the browser and remember the account as a profile (--select-account adds another account).',
+  },
   envs: {
-    values: ['--select'],
+    values: ['--profile'],
     flags: ['--json'],
     required: [],
-    usage: 'envs [--select <profile index>] [--json]',
-    summary: 'List pac profiles and the environments you can deploy to; --select switches profile.',
+    usage: 'envs [--profile <username|id>] [--json]',
+    summary: 'List remembered profiles and the environments you can deploy to; --profile switches the active profile.',
   },
   deploy: {
-    values: ['--spec', '--environment'],
+    values: ['--spec', '--environment', '--profile'],
     flags: ['--json'],
     required: ['--spec', '--environment'],
-    usage: 'deploy --spec <file> --environment <url|name|id> [--json]',
+    usage: 'deploy --spec <file> --environment <url|name|id> [--profile <username|id>] [--json]',
     summary: 'Check, build, pack and import the plug-in into the environment.',
   },
 };
@@ -62,7 +69,8 @@ export const isCommand = (command: string | undefined): command is string => com
 export interface CommandIo {
   stdout: (text: string) => void;
   stderr: (text: string) => void;
-  pacRunner: PacRunner;
+  auth: Auth;
+  dataverse: DataverseClient;
 }
 
 const MAX_SPEC_BYTES = 1024 * 1024;
@@ -155,8 +163,46 @@ function formatDeploy(result: DeployResult): string {
   for (const s of result.steps) {
     lines.push(`  [${s.status}] ${s.step}: ${s.detail.replace(/\n/g, '\n      ')}`);
   }
+  if (result.solutionUrl !== undefined) {
+    lines.push(`  solution: ${result.solutionUrl}`);
+  }
   return `${lines.join('\n')}\n${formatIssues(result.issues)}`;
 }
+
+async function browserSignIn(auth: Auth, io: CommandIo, json: boolean, options: { selectAccount?: boolean; reconnect?: boolean } = {}): Promise<ProfileView> {
+  await auth.startLogin(options);
+  const profile = await auth.waitForLogin();
+  if (!json) io.stderr(`Signed in as ${profile.username}.\n`);
+  return profile;
+}
+
+/** Switches to --profile when given, signs in when there is no profile yet, and reconnects once if the sign-in expired. */
+async function withSignIn<T>(auth: Auth, io: CommandIo, json: boolean, profile: string | undefined, work: () => Promise<T>): Promise<T> {
+  if (profile !== undefined) {
+    const key = profile.toLowerCase();
+    const match = (await auth.status()).profiles.find((p) => p.id === key || p.username.toLowerCase() === key);
+    if (match === undefined) {
+      throw new UsageError(`No remembered profile "${profile}". Run login, or envs to list profiles.`);
+    }
+    await auth.useProfile(match.id);
+  }
+  if ((await auth.status()).state !== 'signed-in') {
+    await browserSignIn(auth, io, json);
+  }
+  try {
+    return await work();
+  } catch (error) {
+    if (!(error instanceof SignInRequiredError)) throw error;
+    if (!json) io.stderr(`${error.message}\n`);
+    await browserSignIn(auth, io, json, { reconnect: true });
+    return work();
+  }
+}
+
+const profileLines = (profiles: readonly ProfileView[], activeId: string | undefined): string =>
+  profiles.length === 0
+    ? '  none — run: login\n'
+    : profiles.map((p) => `  ${p.id === activeId ? '*' : ' '} ${p.username}${p.name && p.name !== p.username ? ` (${p.name})` : ''}${p.needsReauth ? '  [reconnect needed]' : ''}\n`).join('');
 
 /** Exit codes: 0 ok, 2 blocked, 3 failed or invalid input. With --json, stdout is always exactly one JSON object. */
 export async function runCommand(command: string, argv: readonly string[], io: CommandIo): Promise<number> {
@@ -164,7 +210,6 @@ export async function runCommand(command: string, argv: readonly string[], io: C
   const emit = (value: unknown, text: string): void => io.stdout(json ? `${JSON.stringify(value, null, 2)}\n` : text);
   try {
     const values = parse(command, argv);
-    const pac = new PacClient(io.pacRunner);
     const settings = new Map([...values].filter(([key]) => (SETTING_NAMES as readonly string[]).includes(key)));
     switch (command) {
       case 'new':
@@ -212,38 +257,28 @@ export async function runCommand(command: string, argv: readonly string[], io: C
         return checked.ok ? 0 : 3;
       }
       case 'login': {
-        if (!json) io.stdout('Opening pac sign-in in a browser…\n');
-        const result = await pac.login();
-        emit({ ok: result.code === 0, output: lastLines(result.output) }, `${lastLines(result.output)}\n`);
-        return result.code === 0 ? 0 : 3;
+        const profile = await browserSignIn(io.auth, io, json, { selectAccount: argv.includes('--select-account') });
+        emit({ profile }, `Active profile: ${profile.username}\n`);
+        return 0;
       }
       case 'envs': {
-        const select = values.get('--select');
-        if (select !== undefined) {
-          if (!/^\d{1,3}$/.test(select)) {
-            throw new UsageError('--select must be a profile index from the list.');
-          }
-          const selected = await pac.selectProfile(Number(select));
-          if (selected.code !== 0) {
-            throw new UsageError(lastLines(selected.output));
-          }
-        }
-        const profiles = await pac.profiles();
-        const { environments, result } = await pac.environments();
-        const error = result.code === 0 ? undefined : pacError(result.output);
+        const environments = await withSignIn(io.auth, io, json, values.get('--profile'), () => io.dataverse.environments());
+        const status = await io.auth.status();
         emit(
-          { profiles, environments, ...(error === undefined ? {} : { error }) },
+          { active: status.active, profiles: status.profiles, environments },
           [
             'Profiles:\n',
-            profiles.length === 0 ? '  none — run: login\n' : profiles.map((p) => `  [${p.index}]${p.active ? '*' : ' '} ${p.user} ${p.environment}\n`).join(''),
+            profileLines(status.profiles, status.active?.id),
             'Environments:\n',
-            error !== undefined ? `  pac env list failed: ${error}\n` : environments.map((e) => `  ${e.active ? '*' : ' '} ${e.name.padEnd(30)} ${e.type.padEnd(11)} ${e.url}\n`).join(''),
+            environments.length === 0 ? '  none\n' : environments.map((e) => `  ${e.name.padEnd(30)} ${e.type.padEnd(11)} ${e.url}\n`).join(''),
           ].join(''),
         );
-        return error === undefined ? 0 : 3;
+        return 0;
       }
       case 'deploy': {
-        const result = await deploy({ specText: await readSpecFile(values.get('--spec')!), environment: values.get('--environment')!, pac });
+        const specText = await readSpecFile(values.get('--spec')!);
+        await withSignIn(io.auth, io, json, values.get('--profile'), () => io.dataverse.environments());
+        const result = await deploy({ specText, environment: values.get('--environment')!, dataverse: io.dataverse });
         emit(result, formatDeploy(result));
         return result.status === 'succeeded' ? 0 : result.status === 'blocked' ? 2 : 3;
       }
@@ -268,7 +303,8 @@ export function commandHelp(toolName: string, command?: string): string {
   }
   return [
     `${toolName} — build and deploy Dataverse low-code plug-ins (instant Functions and automated plug-ins).`,
-    'Sign-in, environments and solution import use the Power Platform CLI (pac).',
+    'Self-contained: signs in like the Power Apps CLI (browser, no app registration), remembers accounts as profiles,',
+    'and talks to Power Platform and the Dataverse Web API directly. Nothing else needs to be installed.',
     '',
     ...Object.values(COMMANDS).map((c) => `  ${toolName} ${c.usage}\n      ${c.summary}`),
     `  ${toolName} ui [--port <number>] [--open]`,

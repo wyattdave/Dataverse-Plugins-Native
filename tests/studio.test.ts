@@ -1,53 +1,38 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { Auth, POWER_APPS_CLIENT_ID, POWER_APPS_RESOURCE, SignInRequiredError } from '../src/studio/auth.js';
+import { normalizeEnvironmentUrl } from '../src/studio/dataverse.js';
 import { checkFormula } from '../src/studio/fxCheck.js';
-import { checkSpecText, deploy, findEnvironment } from '../src/studio/deploy.js';
-import { PacClient, normalizeEnvironmentUrl, parseAuthList, parseEnvList, parseFetchGuids, type PacRunner } from '../src/studio/pac.js';
+import { checkSpecText, deploy, findEnvironment, solutionPortalUrl } from '../src/studio/deploy.js';
+import { packSolution } from '../src/studio/pack.js';
+import { fileProfileStore, memoryProfileStore, parseStoredProfiles, type Protector } from '../src/studio/profileStore.js';
 import { buildSolutionFiles, defaultStepId, deterministicGuid } from '../src/studio/solution.js';
 import { parsePluginSpec, type PluginSpec } from '../src/studio/spec.js';
-import { cli, clone, examplePath, tempDir } from './helpers.js';
+import {
+  cli,
+  clone,
+  DEV_ID,
+  ENV_URL,
+  examplePath,
+  fakeAuth,
+  fakeBrowser,
+  fakeDataverse,
+  fakePlatform,
+  MESSAGE_ID,
+  OBJECT_ID,
+  PROD_URL,
+  SOLUTION_ID,
+  tempDir,
+  TENANT_ID,
+  unzip,
+} from './helpers.js';
 
 const readSpec = async (name: string): Promise<PluginSpec> => JSON.parse(await readFile(examplePath(name), 'utf8')) as PluginSpec;
 const withFormula = (spec: PluginSpec, formula: string): PluginSpec => ({ ...clone(spec), formula });
 const codes = (spec: PluginSpec): string[] => checkFormula(spec).issues.map((i) => i.code);
-
-const ENV_URL = 'https://contoso-dev.crm.dynamics.com/';
-
-/** Fake pac: canned output per command; records every call. No process is ever spawned. */
-function fakePac(overrides: Partial<Record<string, { code: number; output: string }>> = {}): { runner: PacRunner; calls: string[][] } {
-  const calls: string[][] = [];
-  const defaults: Record<string, { code: number; output: string }> = {
-    'auth list': {
-      code: 0,
-      output:
-        'Index Active Kind      Name User              Cloud  Type Environment     Environment Url\n' +
-        '[1]   *      UNIVERSAL      maker@contoso.com Public User Contoso Dev     https://contoso-dev.crm.dynamics.com/\n',
-    },
-    'env list': {
-      code: 0,
-      output:
-        'Active Display Name    Environment ID                       Environment URL                        Unique Name    Type\n' +
-        '*      Contoso Dev     11111111-2222-3333-4444-555555555555 https://contoso-dev.crm.dynamics.com/  unq1           Sandbox\n' +
-        '       Contoso Prod    66666666-7777-8888-9999-000000000000 https://contoso.crm.dynamics.com/      unq2           Production\n',
-    },
-    'solution pack': { code: 0, output: 'Packing complete.' },
-    'solution import': { code: 0, output: 'Solution Imported successfully.' },
-    'fetch message': { code: 0, output: 'sdkmessageid\n9ebdbb1b-ea3e-db11-86a7-000a3a5473e8\n' },
-    'fetch step': { code: 0, output: 'sdkmessageprocessingstepid\n' },
-  };
-  const runner: PacRunner = async (args) => {
-    calls.push([...args]);
-    let key = `${args[0]} ${args[1]}`;
-    if (key === 'env fetch') {
-      const xml = await readFile(args[args.indexOf('--xmlFile') + 1]!, 'utf8');
-      key = xml.includes('sdkmessageprocessingstep') ? 'fetch step' : 'fetch message';
-    }
-    return overrides[key] ?? defaults[key] ?? { code: 1, output: `unexpected pac call: ${args.join(' ')}` };
-  };
-  return { runner, calls };
-}
 
 describe('plug-in spec', () => {
   it('accepts both examples', async () => {
@@ -161,25 +146,167 @@ describe('solution builder', () => {
   });
 });
 
-describe('pac output parsing', () => {
-  it('parses auth profiles, environments, and fetch results', () => {
-    const profiles = parseAuthList(
-      'Index Active Kind      Name User             Cloud  Type            Environment              Environment Url\n' +
-        '[1]   *      UNIVERSAL      maker@contoso.com Public OperatingSystem Team Tools    https://org1.crm.dynamics.com/\n' +
-        '[2]          UNIVERSAL      maker@contoso.com Public User            Dev Env       https://contoso-dev.crm4.dynamics.com/\n',
-    );
-    assert.deepEqual(profiles, [
-      { index: 1, active: true, user: 'maker@contoso.com', environment: 'Team Tools', environmentUrl: 'https://org1.crm.dynamics.com/' },
-      { index: 2, active: false, user: 'maker@contoso.com', environment: 'Dev Env', environmentUrl: 'https://contoso-dev.crm4.dynamics.com/' },
+describe('sign-in (Power Apps public client, fake Entra)', () => {
+  it('signs in like the Power Apps CLI and remembers the account as the active profile', async () => {
+    const { fetch, calls } = fakePlatform();
+    const browser = fakeBrowser();
+    const store = memoryProfileStore();
+    const auth = fakeAuth(fetch, browser.openUrl, store);
+    assert.equal((await auth.status()).state, 'signed-out');
+    await assert.rejects(auth.getToken('https://contoso-dev.crm.dynamics.com'), SignInRequiredError);
+
+    const authorizeUrl = await auth.startLogin();
+    assert.equal((await auth.status()).state, 'pending');
+    assert.equal(await auth.startLogin(), authorizeUrl, 'a running sign-in is reused');
+    const profile = await auth.waitForLogin();
+    assert.equal(profile.username, 'maker@contoso.com');
+    assert.equal(profile.id, `${OBJECT_ID}.${TENANT_ID}`);
+    const status = await auth.status();
+    assert.equal(status.state, 'signed-in');
+    assert.equal(status.active?.id, profile.id);
+    assert.ok(!JSON.stringify(status).includes('refresh-'), 'refresh tokens never leave the store');
+    assert.equal(store.data.activeId, profile.id);
+    assert.equal(store.data.profiles[0]!.refreshToken, 'refresh-1');
+
+    const url = new URL(authorizeUrl);
+    assert.equal(url.origin + url.pathname, 'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize');
+    assert.equal(url.searchParams.get('client_id'), POWER_APPS_CLIENT_ID);
+    assert.equal(url.searchParams.get('scope'), 'https://service.powerapps.com//.default offline_access openid profile');
+    assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
+    assert.match(url.searchParams.get('redirect_uri')!, /^http:\/\/localhost:\d+$/);
+    const redeem = new URLSearchParams(calls[0]!.body);
+    assert.equal(redeem.get('code'), 'auth-code');
+    assert.equal(createHash('sha256').update(redeem.get('code_verifier')!).digest('base64url'), url.searchParams.get('code_challenge'));
+
+    assert.equal(await auth.getToken(POWER_APPS_RESOURCE), 'token-for-https://service.powerapps.com/');
+    assert.equal(calls.length, 1, 'the sign-in token is cached for Power Platform');
+    assert.equal(await auth.getToken('https://contoso-dev.crm.dynamics.com'), 'token-for-https://contoso-dev.crm.dynamics.com');
+    const refresh = new URLSearchParams(calls[1]!.body);
+    assert.equal(refresh.get('grant_type'), 'refresh_token');
+    assert.equal(refresh.get('scope'), 'https://contoso-dev.crm.dynamics.com/.default offline_access');
+    assert.ok(calls[1]!.url.includes(`/${TENANT_ID}/oauth2/v2.0/token`), 'refreshes against the signed-in tenant');
+    assert.equal(store.data.profiles[0]!.refreshToken, 'refresh-2', 'rotated refresh tokens are saved');
+    for (const bad of ['https://evil.example.com', 'https://contoso-dev.crm.dynamics.com/', 'https://login.microsoftonline.com']) {
+      await assert.rejects(auth.getToken(bad), /only issued/, bad);
+    }
+  });
+
+  it('keeps several profiles, switches between them, flags expired sign-ins and reconnects', async () => {
+    const platform = fakePlatform();
+    const store = memoryProfileStore();
+    const auth = fakeAuth(platform.fetch, fakeBrowser().openUrl, store);
+    await auth.startLogin();
+    const first = await auth.waitForLogin();
+    platform.options.user = { oid: '22222222-1234-4234-8234-123456789012', username: 'second@contoso.com' };
+    const select = await auth.startLogin({ selectAccount: true });
+    assert.equal(new URL(select).searchParams.get('prompt'), 'select_account');
+    const second = await auth.waitForLogin();
+    let status = await auth.status();
+    assert.deepEqual(status.profiles.map((p) => p.username), ['second@contoso.com', 'maker@contoso.com'], 'most recent first');
+    assert.equal(status.active?.id, second.id);
+
+    await auth.useProfile(first.id);
+    assert.equal((await auth.status()).active?.username, 'maker@contoso.com');
+
+    platform.options.tokenError = { error: 'invalid_grant', error_description: 'AADSTS700082: The refresh token has expired.\nTrace ID: x' };
+    await assert.rejects(auth.getToken('https://contoso-dev.crm.dynamics.com'), /maker@contoso\.com has expired; reconnect/);
+    assert.equal((await auth.status()).active?.needsReauth, true);
+    delete platform.options.tokenError;
+    platform.options.user = { oid: OBJECT_ID, username: 'maker@contoso.com' };
+    const reconnect = await auth.startLogin({ reconnect: true });
+    assert.equal(new URL(reconnect).searchParams.get('login_hint'), 'maker@contoso.com');
+    await auth.waitForLogin();
+    status = await auth.status();
+    assert.equal(status.active?.needsReauth, false);
+    assert.equal(status.profiles.length, 2);
+
+    await auth.removeProfile(first.id);
+    status = await auth.status();
+    assert.equal(status.active?.username, 'second@contoso.com', 'the next most recent profile becomes active');
+    await auth.removeProfile(second.id);
+    assert.equal((await auth.status()).state, 'signed-out');
+    assert.deepEqual(store.data, { activeId: undefined, profiles: [] });
+  });
+
+  it('ignores redirects with the wrong state and reports sign-in errors without trace ids', async () => {
+    const { fetch } = fakePlatform();
+    const wrongState = fakeAuth(fetch, fakeBrowser({ state: 'forged' }).openUrl);
+    await wrongState.startLogin();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal((await wrongState.status()).state, 'pending');
+    wrongState.cancelLogin();
+    assert.equal((await wrongState.status()).state, 'signed-out');
+    assert.equal((await wrongState.status()).error, undefined, 'cancelling is not an error');
+
+    const denied = fakeAuth(fetch, fakeBrowser({ error: 'access_denied' }).openUrl);
+    await denied.startLogin();
+    await assert.rejects(denied.waitForLogin(), /access_denied: AADSTS65001/);
+    const deniedStatus = await denied.status();
+    assert.equal(deniedStatus.state, 'signed-out');
+    assert.doesNotMatch(deniedStatus.error!, /Trace ID/);
+  });
+});
+
+describe('profile store', () => {
+  it('persists profiles through a protector and ignores unreadable or malformed files', async () => {
+    const dir = await tempDir();
+    const path = join(dir, 'profiles.dat');
+    const flip: Protector = { protect: async (d) => Buffer.from(d.map((b) => b ^ 0xff)), unprotect: async (d) => Buffer.from(d.map((b) => b ^ 0xff)) };
+    const store = fileProfileStore(path, flip);
+    assert.deepEqual(await store.load(), { activeId: undefined, profiles: [] });
+    const data = { activeId: 'a.b', profiles: [{ id: 'a.b', username: 'u@x.com', name: 'U', tenantId: 't', lastUsed: '2026-01-01T00:00:00.000Z', refreshToken: 'secret-rt' }] };
+    await store.save(data);
+    assert.ok(!(await readFile(path)).includes('secret-rt'), 'the file is not plain text');
+    assert.deepEqual(await store.load(), data);
+    assert.deepEqual(await fileProfileStore(path, { protect: flip.protect, unprotect: () => Promise.reject(new Error('wrong user')) }).load(), {
+      activeId: undefined,
+      profiles: [],
+    });
+    assert.deepEqual(parseStoredProfiles('{"version":1,"activeId":"x","profiles":[{"id":"x"}]}'), { activeId: undefined, profiles: [] });
+  });
+});
+
+describe('solution packer', () => {
+  it('packs the SolutionPackager layout: BOM + CRLF root XML, inlined steps, unchanged components', async () => {
+    const stepId = 'abcdefab-1234-4abc-8abc-abcdefabcdef';
+    const files = buildSolutionFiles(await readSpec('automated.plugin.json'), { sdkMessageId: MESSAGE_ID, stepId });
+    const entries = unzip(packSolution(files));
+    assert.deepEqual([...entries.keys()], [
+      'customizations.xml',
+      'solution.xml',
+      'fxexpressions/sample_AccountNameRequired/expression.yaml',
+      'fxexpressions/sample_AccountNameRequired/fxexpression.json',
+      '[Content_Types].xml',
     ]);
-    const envs = parseEnvList(
-      'Active Display Name    Environment ID                       Environment URL                        Unique Name\n' +
-        '*      Contoso Dev     11111111-2222-3333-4444-555555555555 https://Contoso-Dev.crm.dynamics.com   unq1\n',
-    );
-    assert.deepEqual(envs, [{ name: 'Contoso Dev', id: '11111111-2222-3333-4444-555555555555', url: 'https://contoso-dev.crm.dynamics.com/', active: true, type: 'Unknown' }]);
-    assert.deepEqual(parseFetchGuids('Connected to org 99999999-9999-9999-9999-999999999999\nsdkmessageid\n9EBDBB1B-EA3E-DB11-86A7-000A3A5473E8\n', 'sdkmessageid'), ['9ebdbb1b-ea3e-db11-86a7-000a3a5473e8']);
-    assert.deepEqual(parseFetchGuids('No records.\n', 'sdkmessageid'), []);
-    assert.equal(parseFetchGuids('id 99999999-9999-9999-9999-999999999999', 'sdkmessageid'), undefined);
+    const customizations = entries.get('customizations.xml')!.toString('utf8');
+    assert.ok(customizations.startsWith('\uFEFF<?xml'));
+    assert.ok(!/[^\r]\n/.test(customizations) && !customizations.endsWith('\n'), 'CRLF, no trailing newline');
+    assert.match(customizations, new RegExp(`<SdkMessageProcessingSteps>\\r\\n    <SdkMessageProcessingStep Name="Account name required" SdkMessageProcessingStepId="\\{${stepId}\\}">`));
+    assert.doesNotMatch(customizations, /<\?xml[\s\S]*<\?xml/);
+    assert.equal(entries.get('solution.xml')!.toString('utf8'), `\uFEFF${files.get('Other/Solution.xml')!.trimEnd().replace(/\n/g, '\r\n')}`);
+    assert.equal(entries.get('fxexpressions/sample_AccountNameRequired/expression.yaml')!.toString('utf8'), files.get('fxexpressions/sample_AccountNameRequired/expression.yaml'));
+    assert.match(entries.get('[Content_Types].xml')!.toString('utf8'), /<Default Extension="xml" [^>]*\/><Default Extension="yaml" [^>]*\/><Default Extension="json" [^>]*\/>/);
+    assert.ok(packSolution(files).equals(packSolution(files)), 'deterministic');
+  });
+
+  it('packs instant plug-ins with custom API folders and an empty steps element', async () => {
+    const entries = unzip(packSolution(buildSolutionFiles(await readSpec('instant.plugin.json'))));
+    assert.ok(entries.has('customapis/sample_CalculateFee/customapirequestparameters/Amount/customapirequestparameter.xml'));
+    assert.match(entries.get('customizations.xml')!.toString('utf8'), /<SdkMessageProcessingSteps \/>/);
+  });
+});
+
+describe('Dataverse client (fake transport)', () => {
+  it('lists Dataverse environments with their type from the Power Platform API', async () => {
+    const { fetch, calls } = fakePlatform();
+    const environments = await fakeDataverse(fetch).environments();
+    assert.deepEqual(environments, [
+      { name: 'Contoso (default)', id: `Default-${TENANT_ID}`, url: 'https://orgdefault.crm.dynamics.com/', type: 'Default' },
+      { name: 'Contoso Dev', id: DEV_ID, url: ENV_URL, type: 'Sandbox' },
+      { name: 'Contoso Prod', id: '66666666-7777-8888-9999-000000000000', url: PROD_URL, type: 'Production' },
+    ]);
+    assert.equal(calls[0]!.url, 'https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/environments?api-version=2020-10-01');
+    assert.equal(calls[0]!.authorization, 'Bearer token-for-https://service.powerapps.com/');
   });
 
   it('only accepts Dataverse https environment URLs', () => {
@@ -188,80 +315,121 @@ describe('pac output parsing', () => {
       assert.equal(normalizeEnvironmentUrl(bad), undefined, bad);
     }
   });
+
+  it('links to the solution in the maker portal for commercial environments only', () => {
+    const env = { name: 'x', id: DEV_ID, url: ENV_URL, type: 'Sandbox' as const };
+    assert.equal(solutionPortalUrl(env, SOLUTION_ID), `https://make.powerapps.com/environments/${DEV_ID}/solutions/${SOLUTION_ID}`);
+    assert.equal(solutionPortalUrl({ ...env, id: `Default-${TENANT_ID}` }, SOLUTION_ID), `https://make.powerapps.com/environments/Default-${TENANT_ID}/solutions/${SOLUTION_ID}`);
+    assert.equal(solutionPortalUrl({ ...env, url: 'https://gov.crm9.dynamics.com/' }, SOLUTION_ID), undefined);
+    assert.equal(solutionPortalUrl({ ...env, id: '' }, SOLUTION_ID), undefined);
+  });
 });
 
-describe('deploy (fake pac)', () => {
-  it('checks, packs and imports an instant plug-in into a listed sandbox', async () => {
-    const { runner, calls } = fakePac();
-    const result = await deploy({ specText: await readFile(examplePath('instant.plugin.json'), 'utf8'), environment: ENV_URL, pac: new PacClient(runner) });
+describe('deploy (fake Dataverse)', () => {
+  const instant = () => readFile(examplePath('instant.plugin.json'), 'utf8');
+  const automated = () => readFile(examplePath('automated.plugin.json'), 'utf8');
+
+  it('checks, packs and imports an instant plug-in into a listed sandbox, then links the solution', async () => {
+    const { fetch, calls } = fakePlatform();
+    const progress: string[] = [];
+    const result = await deploy({
+      specText: await instant(),
+      environment: ENV_URL,
+      dataverse: fakeDataverse(fetch),
+      onProgress: (steps) => progress.push(steps.map((s) => `${s.step}:${s.status}`).join(',')),
+    });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     assert.deepEqual(result.steps.map((s) => s.step), ['check', 'environment', 'pack', 'import']);
-    assert.deepEqual(calls.map((c) => `${c[0]} ${c[1]}`), ['env list', 'solution pack', 'solution import']);
-    const importCall = calls.at(-1)!;
-    assert.equal(importCall[importCall.indexOf('--environment') + 1], ENV_URL);
-    assert.ok(!importCall.includes('--publish-changes') && !importCall.includes('--activate-plugins'));
+    assert.ok(progress.includes('check:done,environment:done,pack:done,import:running'), progress.join('\n'));
+    assert.equal(result.solutionUrl, `https://make.powerapps.com/environments/${DEV_ID}/solutions/${SOLUTION_ID}`);
+    const importCall = calls.find((c) => c.url.endsWith('/ImportSolutionAsync'))!;
+    assert.equal(importCall.url, `${ENV_URL}api/data/v9.2/ImportSolutionAsync`);
+    assert.equal(importCall.authorization, 'Bearer token-for-https://contoso-dev.crm.dynamics.com');
+    const body = JSON.parse(importCall.body) as Record<string, unknown>;
+    const entries = unzip(Buffer.from(body['CustomizationFile'] as string, 'base64'));
+    assert.ok(entries.has('solution.xml') && entries.has('customapis/sample_CalculateFee/customapi.xml'));
+    assert.equal(body['PublishWorkflows'], false);
+    assert.equal(body['OverwriteUnmanagedCustomizations'], false);
   });
 
-  it('resolves the message and reuses an existing step for automated plug-ins', async () => {
+  it('resolves the message and reuses an existing step for automated plug-ins via the Web API', async () => {
     const existing = 'abcdefab-1234-4abc-8abc-abcdefabcdef';
     const dir = await tempDir();
-    const { runner } = fakePac({ 'fetch step': { code: 0, output: `sdkmessageprocessingstepid\n${existing}\n` } });
-    const result = await deploy({ specText: await readFile(examplePath('automated.plugin.json'), 'utf8'), environment: ENV_URL, pac: new PacClient(runner), outDir: dir });
+    const { fetch, calls } = fakePlatform({ steps: [existing] });
+    const result = await deploy({ specText: await automated(), environment: ENV_URL, dataverse: fakeDataverse(fetch), outDir: dir });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     const step = await readFile(join(dir, 'solution', 'SdkMessageProcessingSteps', `{${existing}}.xml`), 'utf8');
-    assert.match(step, /<SdkMessageId>9ebdbb1b-ea3e-db11-86a7-000a3a5473e8<\/SdkMessageId>/);
+    assert.match(step, new RegExp(`<SdkMessageId>${MESSAGE_ID}</SdkMessageId>`));
+    const zip = unzip(await readFile(join(dir, 'SampleLowCodePlugins.zip')));
+    assert.match(zip.get('customizations.xml')!.toString('utf8'), new RegExp(`SdkMessageProcessingStepId="\\{${existing}\\}"`));
+    const query = decodeURIComponent(new URL(calls.find((c) => c.url.includes('/sdkmessageprocessingsteps?'))!.url).searchParams.get('fetchXml')!);
+    assert.match(query, /<condition attribute="uniquename" operator="eq" value="sample_AccountNameRequired" \/>/);
   });
 
-  it('fails closed on ambiguous existing steps', async () => {
-    const { runner, calls } = fakePac({
-      'fetch step': { code: 0, output: 'sdkmessageprocessingstepid\naaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\nbbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb\n' },
-    });
-    const result = await deploy({ specText: await readFile(examplePath('automated.plugin.json'), 'utf8'), environment: ENV_URL, pac: new PacClient(runner) });
-    assert.equal(result.status, 'failed');
-    assert.ok(!calls.some((c) => c[0] === 'solution'));
+  it('fails closed on ambiguous existing steps or messages', async () => {
+    for (const options of [{ steps: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'] }, { messages: [] }]) {
+      const { fetch, calls } = fakePlatform(options);
+      const result = await deploy({ specText: await automated(), environment: ENV_URL, dataverse: fakeDataverse(fetch) });
+      assert.equal(result.status, 'failed');
+      assert.equal(result.steps.at(-1)!.step, 'resolve');
+      assert.ok(!calls.some((c) => c.method === 'POST'));
+    }
   });
 
-  it('deploys to production environments listed by pac', async () => {
-    const { runner, calls } = fakePac();
-    const spec = await readFile(examplePath('instant.plugin.json'), 'utf8');
-    const result = await deploy({ specText: spec, environment: 'https://contoso.crm.dynamics.com/', pac: new PacClient(runner) });
+  it('deploys to production environments and reports their type', async () => {
+    const result = await deploy({ specText: await instant(), environment: PROD_URL, dataverse: fakeDataverse(fakePlatform().fetch) });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     assert.equal(result.environment?.type, 'Production');
-    assert.ok(calls.some((c) => c[0] === 'solution' && c[1] === 'import'));
   });
 
   it('finds environments by URL, id or display name, and refuses ambiguous names', async () => {
-    const { runner } = fakePac();
-    const { environments } = await new PacClient(runner).environments();
-    for (const value of [ENV_URL, 'https://Contoso-Dev.crm.dynamics.com', '11111111-2222-3333-4444-555555555555', 'contoso dev']) {
+    const environments = await fakeDataverse(fakePlatform().fetch).environments();
+    for (const value of [ENV_URL, 'https://Contoso-Dev.crm.dynamics.com', DEV_ID, 'contoso dev']) {
       assert.equal((findEnvironment(environments, value) as { url: string }).url, ENV_URL, value);
     }
+    assert.equal((findEnvironment(environments, `default-${TENANT_ID}`) as { type: string }).type, 'Default');
     assert.equal(findEnvironment(environments, 'Contoso'), 'none');
     assert.equal(findEnvironment(environments, ' '), 'none');
-    const twins = [environments[0]!, { ...environments[0]!, url: 'https://twin.crm.dynamics.com/', id: 'x' }];
+    const twins = [environments[1]!, { ...environments[1]!, url: 'https://twin.crm.dynamics.com/', id: 'x' }];
     assert.equal(findEnvironment(twins, 'Contoso Dev'), 'ambiguous');
   });
 
-  it('blocks unlisted environments and specs that fail the check without importing', async () => {
-    const spec = await readFile(examplePath('instant.plugin.json'), 'utf8');
-    for (const [url, specText] of [
-      ['https://other.crm.dynamics.com/', spec],
-      ['https://evil.example.com/', spec],
-      [ENV_URL, spec.replace('{ Fee: Amount * Rate }', '{ Fee: (Amount * Rate }')],
+  it('blocks unlisted environments, signed-out users and specs that fail the check without importing', async () => {
+    const spec = await instant();
+    for (const [url, specText, tokens] of [
+      ['https://other.crm.dynamics.com/', spec, undefined],
+      ['https://evil.example.com/', spec, undefined],
+      [ENV_URL, spec.replace('{ Fee: Amount * Rate }', '{ Fee: (Amount * Rate }'), undefined],
+      [ENV_URL, spec, { getToken: () => Promise.reject(new SignInRequiredError()) }],
     ] as const) {
-      const { runner, calls } = fakePac();
-      const result = await deploy({ specText, environment: url, pac: new PacClient(runner) });
+      const { fetch, calls } = fakePlatform();
+      const result = await deploy({ specText, environment: url, dataverse: fakeDataverse(fetch, tokens) });
       assert.equal(result.status, 'blocked', url);
-      assert.ok(!calls.some((c) => c[0] === 'solution'), url);
+      assert.ok(!calls.some((c) => c.method === 'POST'), url);
     }
   });
 
-  it('reports pack and import failures', async () => {
-    const spec = await readFile(examplePath('instant.plugin.json'), 'utf8');
-    const { runner } = fakePac({ 'solution import': { code: 1, output: 'Error: publisher mismatch' } });
-    const result = await deploy({ specText: spec, environment: ENV_URL, pac: new PacClient(runner) });
-    assert.equal(result.status, 'failed');
-    assert.match(result.steps.at(-1)!.detail, /publisher mismatch/);
+  it('reports import failures from Dataverse', async () => {
+    const { fetch } = fakePlatform({ importStatus: 31, importMessage: 'Publisher prefix mismatch.' });
+    const importFailed = await deploy({ specText: await instant(), environment: ENV_URL, dataverse: fakeDataverse(fetch) });
+    assert.equal(importFailed.status, 'failed');
+    assert.equal(importFailed.steps.at(-1)!.detail, 'Publisher prefix mismatch.');
+    assert.equal(importFailed.solutionUrl, undefined);
+  });
+
+  it('retries the import while another customization is running, with a new import job each time', async () => {
+    const { fetch, calls } = fakePlatform({ busyImports: 2 });
+    const progress: string[] = [];
+    const result = await deploy({ specText: await instant(), environment: ENV_URL, dataverse: fakeDataverse(fetch), onProgress: (steps) => progress.push(steps.at(-1)!.detail) });
+    assert.equal(result.status, 'succeeded', JSON.stringify(result));
+    const imports = calls.filter((c) => c.url.endsWith('/ImportSolutionAsync'));
+    assert.equal(imports.length, 3);
+    assert.equal(new Set(imports.map((c) => (JSON.parse(c.body) as { ImportJobId: string }).ImportJobId)).size, 3);
+    assert.ok(progress.some((p) => /Another customization .* Retrying in 0s \(attempt 3 of 3\)/.test(p)), progress.join('\n'));
+
+    const stillBusy = await deploy({ specText: await instant(), environment: ENV_URL, dataverse: fakeDataverse(fakePlatform({ busyImports: 5 }).fetch) });
+    assert.equal(stillBusy.status, 'failed');
+    assert.match(stillBusy.steps.at(-1)!.detail, /another \[EntityCustomization\] running[\s\S]*Gave up after 3 attempts\./);
   });
 });
 
@@ -331,20 +499,51 @@ describe('CLI (agent workflow)', () => {
     assert.equal((await cli(['set', '--spec', join(dir, 'broken.json'), '--name', 'X'])).code, 3);
   });
 
-  it('lists environments and deploys by environment name through pac', async () => {
+  it('signs in once, remembers the profile, lists environments and deploys by environment name', async () => {
     const dir = await tempDir();
     const path = join(dir, 'fee.plugin.json');
     assert.equal((await cli(['new', '--kind', 'instant', '--out', path])).code, 0);
-    const { runner, calls } = fakePac();
-    const envs = await cli(['envs', '--json'], runner);
-    assert.equal(envs.code, 0);
-    assert.deepEqual(json<{ environments: { name: string }[] }>(envs).environments.map((e) => e.name), ['Contoso Dev', 'Contoso Prod']);
-    const deployed = await cli(['deploy', '--spec', path, '--environment', 'Contoso Dev', '--json'], runner);
+    const platform = fakePlatform();
+    const browser = fakeBrowser();
+    const store = memoryProfileStore();
+    const auth = fakeAuth(platform.fetch, browser.openUrl, store);
+    const io = { auth, dataverse: fakeDataverse(platform.fetch, auth) };
+    const envs = await cli(['envs', '--json'], io);
+    assert.equal(envs.code, 0, envs.stdout);
+    const listed = json<{ active: { username: string }; profiles: unknown[]; environments: { name: string; type: string }[] }>(envs);
+    assert.equal(listed.active.username, 'maker@contoso.com');
+    assert.equal(listed.profiles.length, 1);
+    assert.deepEqual(listed.environments.map((e) => `${e.name}:${e.type}`), ['Contoso (default):Default', 'Contoso Dev:Sandbox', 'Contoso Prod:Production']);
+
+    // A new process with the same store reuses the remembered profile without opening the browser.
+    const later = fakeAuth(platform.fetch, browser.openUrl, store);
+    const laterIo = { auth: later, dataverse: fakeDataverse(platform.fetch, later) };
+    const deployed = await cli(['deploy', '--spec', path, '--environment', 'Contoso Dev', '--json'], laterIo);
     assert.equal(deployed.code, 0, deployed.stdout);
     assert.equal(json<{ status: string }>(deployed).status, 'succeeded');
-    const importCall = calls.find((c) => c[0] === 'solution' && c[1] === 'import')!;
-    assert.equal(importCall[importCall.indexOf('--environment') + 1], ENV_URL);
-    assert.equal((await cli(['deploy', '--spec', path, '--environment', 'Nowhere'], fakePac().runner)).code, 2);
+    assert.equal(browser.opened.length, 1, 'signed in only once');
+    assert.ok(platform.calls.some((c) => c.url === `${ENV_URL}api/data/v9.2/ImportSolutionAsync`));
+    assert.equal((await cli(['deploy', '--spec', path, '--environment', 'Nowhere'], laterIo)).code, 2);
+    assert.equal((await cli(['envs', '--profile', 'nobody@contoso.com', '--json'], laterIo)).code, 3);
+    assert.equal((await cli(['envs', '--profile', 'MAKER@contoso.com', '--json'], laterIo)).code, 0);
+  });
+
+  it('reconnects automatically when the remembered sign-in has expired', async () => {
+    const platform = fakePlatform();
+    const browser = fakeBrowser();
+    const store = memoryProfileStore();
+    const auth = fakeAuth(platform.fetch, browser.openUrl, store);
+    assert.equal((await cli(['login', '--json'], { auth, dataverse: fakeDataverse(platform.fetch, auth) })).code, 0);
+    let failures = 1;
+    const flaky: typeof platform.fetch = async (url, init) =>
+      url.includes('/oauth2/v2.0/token') && String(init.body).includes('grant_type=refresh_token') && failures-- > 0
+        ? new Response(JSON.stringify({ error: 'invalid_grant', error_description: 'expired' }), { status: 400 })
+        : platform.fetch(url, init);
+    const later = new Auth({ store, fetch: flaky, openUrl: browser.openUrl });
+    const run = await cli(['envs'], { auth: later, dataverse: fakeDataverse(platform.fetch, later) });
+    assert.equal(run.code, 0, run.stderr);
+    assert.match(run.stderr, /has expired; reconnect/);
+    assert.equal(new URL(browser.opened.at(-1)!).searchParams.get('login_hint'), 'maker@contoso.com');
   });
 
   it('prints help and rejects unknown commands, arguments and missing options', async () => {

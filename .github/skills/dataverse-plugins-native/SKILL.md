@@ -1,18 +1,19 @@
 ---
-name: dv-native
-description: "Use when: creating, editing, syntax-checking or deploying a Dataverse low-code plug-in (instant plug-in / Dataverse Function / Custom API, or automated plug-in on a table Create/Update/Delete event) written in Power Fx, using the dv-native CLI and the Power Platform CLI (pac). Covers writing the .fx script, setting solution/publisher/parameters/trigger, check, environment selection and deploy."
+name: dataverse-plugins-native
+description: "Use when: creating, editing, syntax-checking or deploying a Dataverse low-code plug-in (instant plug-in / Dataverse Function / Custom API, or automated plug-in on a table Create/Update/Delete event) written in Power Fx, using the dv-native CLI. Covers writing the .fx script, setting solution/publisher/parameters/trigger, check, browser sign-in, environment selection and deploy."
 ---
 
 # Deploy Dataverse low-code plug-ins with dv-native
 
-dv-native turns a Power Fx script plus a few settings into a solution and imports it with `pac`. The state lives in
-one spec file (`*.plugin.json`); you change it only through the CLI.
+dv-native turns a Power Fx script plus a few settings into a solution and imports it through the Dataverse Web API.
+The state lives in one spec file (`*.plugin.json`); you change it only through the CLI.
 
 ## Running the CLI
 
 - Run it with `npx -y dv-native <command> …` (`-y` skips npx's install prompt, which would block a non-interactive
-  run). Needs Node.js ≥ 22.12 and the Power Platform CLI (`pac`) on PATH; if `pac` is missing, commands fail with an
-  install link — tell the user to install it from https://aka.ms/PowerPlatformCLI.
+  run). Needs Node.js ≥ 22.12 only; nothing else has to be installed.
+- Sign-in is a browser sign-in the user completes themselves (same as the Power Apps CLI, no app registration). The
+  account is remembered as a profile, so later commands usually don't open the browser again.
 - Always pass `--json`. stdout is then one JSON object; failures are `{ "error": "…" }`.
 - Exit codes: `0` ok · `2` blocked (nothing was imported) · `3` failed or invalid input.
 - `npx -y dv-native <command> --help` prints the exact options.
@@ -84,12 +85,12 @@ The check is syntax-only; the environment compiles the formula during import, so
 npx -y dv-native envs --json
 ```
 
-Returns `profiles` (pac sign-ins, `active` marks the current one) and `environments` (`name`, `id`, `url`, `type`,
-`active`) for the active profile.
+If there is no profile yet it opens a browser sign-in the user must complete themselves (tell them to expect it).
+Returns `active` (the profile in use), `profiles` (remembered accounts, `needsReauth` when a saved sign-in expired) and
+`environments` (`name`, `id`, `url`, `type` — Production, Sandbox, Developer, Default, Trial, Teams or Unknown).
 
-- No profiles, or an `error` mentioning sign-in/expired: run `npx -y dv-native login` (it opens a browser sign-in the
-  user must complete themselves), then call `envs` again.
-- Wrong account: `npx -y dv-native envs --select <profile index> --json`.
+- Wrong account: `npx -y dv-native envs --profile <username> --json`, or `npx -y dv-native login --select-account`
+  to add another account.
 - Show the user the candidate environments with their `type`, and get them to confirm which one to use.
 
 ### 5. Deploy (only after the user confirms)
@@ -103,7 +104,8 @@ npx -y dv-native deploy --spec plugins/fee.plugin.json --environment https://con
 
 `--environment` accepts the URL (preferred), the id, or the exact display name; ambiguous names are blocked.
 The result has `status` (`succeeded` / `blocked` / `failed`) and `steps` (`check`, `environment`, `resolve`
-(automated only), `pack`, `import`) each with `status` and `detail`. Report the failing step's `detail` to the user —
+(automated only), `pack`, `import`) each with `status` and `detail`, plus `solutionUrl` (a Power Apps link to the
+solution) on success — give that link to the user. Report the failing step's `detail` to the user —
 import errors (e.g. publisher prefix mismatch, formula compile errors) come straight from Dataverse.
 
 Redeploying the same spec updates the plug-in in place. Deploy never deletes, publishes all customizations, or

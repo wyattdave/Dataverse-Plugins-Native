@@ -4,10 +4,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { int, obj, str, validateSchema, type Schema } from '../core/schema.js';
+import { bool, obj, str, validateSchema, type Schema } from '../core/schema.js';
 import { parseStrictJson } from '../core/strictJson.js';
-import { checkSpecText, deploy } from '../studio/deploy.js';
-import { createPacRunner, normalizeEnvironmentUrl, PacClient, PacNotFoundError, lastLines, pacError, type PacRunner } from '../studio/pac.js';
+import { SignInRequiredError, type Auth } from '../studio/auth.js';
+import { DataverseClient, normalizeEnvironmentUrl } from '../studio/dataverse.js';
+import { checkSpecText, deploy, type DeployResult, type DeployStep } from '../studio/deploy.js';
 import { PARAMETER_TYPES, TRIGGER_MESSAGES, TRIGGER_STAGES } from '../studio/spec.js';
 import { TOOL_NAME, TOOL_VERSION } from '../version.js';
 
@@ -40,7 +41,9 @@ const CONTENT_SECURITY_POLICY = [
 
 const specText = () => str({ minLength: 1, maxLength: MAX_SPEC_BYTES });
 const checkRequestSchema: Schema = obj({ spec: specText() });
-const selectRequestSchema: Schema = obj({ index: int({ min: 1, max: 999 }) });
+const loginRequestSchema: Schema = obj({ selectAccount: bool(), reconnect: bool() }, ['selectAccount', 'reconnect']);
+const profileRequestSchema: Schema = obj({ id: str({ minLength: 1, maxLength: 200 }) });
+const emptyRequestSchema: Schema = obj({});
 const deployRequestSchema: Schema = obj({
   spec: specText(),
   environmentUrl: str({ maxLength: 512 }),
@@ -49,8 +52,10 @@ const deployRequestSchema: Schema = obj({
 
 export interface UiServerOptions {
   port?: number;
-  /** Runs the Power Platform CLI; tests inject a fake. */
-  pacRunner?: PacRunner;
+  /** Our own sign-in; tokens stay in this process. */
+  auth: Auth;
+  /** Dataverse calls; defaults to a client using `auth`. Tests inject one with a fake transport. */
+  dataverse?: DataverseClient;
 }
 
 export interface UiServer {
@@ -65,9 +70,11 @@ export interface UiServer {
  * Starts the local UI on 127.0.0.1 only. Every API call needs the per-session token, an allowed Host header
  * (DNS-rebinding defence), and a same-origin Origin when present. Request bodies are never logged or persisted.
  */
-export async function startUiServer(options: UiServerOptions = {}): Promise<UiServer> {
-  const pac = new PacClient(options.pacRunner ?? createPacRunner());
-  let pacBusy = false;
+export async function startUiServer(options: UiServerOptions): Promise<UiServer> {
+  const { auth } = options;
+  const dataverse = options.dataverse ?? new DataverseClient(auth);
+  /** The current or last deploy; only one runs at a time. */
+  let job: { running: boolean; steps: DeployStep[]; result?: DeployResult; error?: string } | undefined;
   const token = randomBytes(32).toString('hex');
   const tokenBytes = Buffer.from(token, 'utf8');
 
@@ -192,23 +199,6 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     return parsed;
   };
 
-  /** pac calls are serialized: sign-in and import must never overlap. */
-  const withPac = async (res: ServerResponse, work: () => Promise<unknown>): Promise<void> => {
-    if (pacBusy) {
-      sendJson(res, 409, { error: 'Another pac operation is still running.' });
-      return;
-    }
-    pacBusy = true;
-    try {
-      sendJson(res, 200, await work());
-    } catch (error) {
-      const message = error instanceof PacNotFoundError ? error.message : 'pac failed unexpectedly.';
-      sendJson(res, error instanceof PacNotFoundError ? 503 : 500, { error: message });
-    } finally {
-      pacBusy = false;
-    }
-  };
-
   const handleStudio = async (req: IncomingMessage, res: ServerResponse, route: string): Promise<void> => {
     if (req.method === 'GET' && route === 'meta') {
       sendJson(res, 200, {
@@ -228,32 +218,54 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
       }
       return;
     }
-    if (req.method === 'GET' && route === 'profiles') {
-      await withPac(res, async () => ({ profiles: await pac.profiles() }));
+    if (req.method === 'GET' && route === 'session') {
+      sendJson(res, 200, await auth.status());
       return;
     }
     if (req.method === 'POST' && route === 'login') {
-      await withPac(res, async () => {
-        const result = await pac.login();
-        return { ok: result.code === 0, output: lastLines(result.output), profiles: await pac.profiles() };
-      });
+      const body = (await readJsonRequest(req, res, loginRequestSchema)) as { selectAccount?: boolean; reconnect?: boolean } | undefined;
+      if (body === undefined) {
+        return;
+      }
+      try {
+        await auth.startLogin(body);
+        sendJson(res, 200, await auth.status());
+      } catch (error) {
+        sendJson(res, 500, { error: error instanceof Error ? error.message : 'Sign-in failed.' });
+      }
       return;
     }
-    if (req.method === 'POST' && route === 'select') {
-      const body = (await readJsonRequest(req, res, selectRequestSchema)) as { index: number } | undefined;
-      if (body !== undefined) {
-        await withPac(res, async () => {
-          const result = await pac.selectProfile(body.index);
-          return { ok: result.code === 0, output: lastLines(result.output), profiles: await pac.profiles() };
-        });
+    if (req.method === 'POST' && route === 'login/cancel') {
+      if ((await readJsonRequest(req, res, emptyRequestSchema)) !== undefined) {
+        auth.cancelLogin();
+        sendJson(res, 200, await auth.status());
+      }
+      return;
+    }
+    if (req.method === 'POST' && (route === 'profiles/select' || route === 'profiles/remove')) {
+      const body = (await readJsonRequest(req, res, profileRequestSchema)) as { id: string } | undefined;
+      if (body === undefined) {
+        return;
+      }
+      try {
+        await (route === 'profiles/select' ? auth.useProfile(body.id) : auth.removeProfile(body.id));
+        sendJson(res, 200, await auth.status());
+      } catch (error) {
+        sendJson(res, error instanceof SignInRequiredError ? 404 : 500, { error: error instanceof Error ? error.message : 'Profile update failed.' });
       }
       return;
     }
     if (req.method === 'GET' && route === 'environments') {
-      await withPac(res, async () => {
-        const { environments, result } = await pac.environments();
-        return result.code === 0 ? { environments } : { environments, error: pacError(result.output) };
-      });
+      try {
+        sendJson(res, 200, { environments: await dataverse.environments() });
+      } catch (error) {
+        const signInRequired = error instanceof SignInRequiredError;
+        sendJson(res, 200, { environments: [], error: error instanceof Error ? error.message : 'Could not list environments.', signInRequired });
+      }
+      return;
+    }
+    if (req.method === 'GET' && route === 'deploy') {
+      sendJson(res, 200, job ?? { running: false, steps: [] });
       return;
     }
     if (req.method === 'POST' && route === 'deploy') {
@@ -268,7 +280,24 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
         sendJson(res, 400, { error: 'Deploy needs the environment URL confirmed exactly.' });
         return;
       }
-      await withPac(res, () => deploy({ specText: body.spec, environment: target, pac }));
+      if (job?.running === true) {
+        sendJson(res, 409, { error: 'Another deploy is still running.' });
+        return;
+      }
+      const current: NonNullable<typeof job> = { running: true, steps: [] };
+      job = current;
+      deploy({ specText: body.spec, environment: target, dataverse, onProgress: (steps) => (current.steps = steps) })
+        .then((result) => {
+          current.steps = result.steps;
+          current.result = result;
+        })
+        .catch(() => {
+          current.error = 'Deploy failed unexpectedly.';
+        })
+        .finally(() => {
+          current.running = false;
+        });
+      sendJson(res, 202, current);
       return;
     }
     sendFailure(res, 404, 'Not found.');
@@ -298,6 +327,7 @@ export async function startUiServer(options: UiServerOptions = {}): Promise<UiSe
     launchUrl: `${originUrl}/?session=${token}`,
     close: () =>
       new Promise<void>((resolve) => {
+        auth.cancelLogin();
         server.closeAllConnections();
         server.close(() => resolve());
       }),

@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { normalizeEnvironmentUrl, type DataverseClient, type Environment } from './dataverse.js';
 import { checkFormula } from './fxCheck.js';
-import { lastLines, normalizeEnvironmentUrl, pacError, PacClient, type PacEnvironment } from './pac.js';
+import { packSolution } from './pack.js';
 import { buildSolutionFiles, defaultStepId, xmlEscape, type AutomatedBinding, type SolutionFiles } from './solution.js';
 import { parsePluginSpec, type Issue, type PluginSpec } from './spec.js';
 
@@ -30,7 +30,7 @@ export async function writeSolutionFolder(files: SolutionFiles, folder: string):
   }
 }
 
-export type StepStatus = 'done' | 'failed' | 'blocked' | 'skipped';
+export type StepStatus = 'running' | 'done' | 'failed' | 'blocked' | 'skipped';
 
 export interface DeployStep {
   step: string;
@@ -40,28 +40,32 @@ export interface DeployStep {
 
 export interface DeployResult {
   status: 'succeeded' | 'failed' | 'blocked';
-  environment: PacEnvironment | undefined;
+  environment: Environment | undefined;
   steps: DeployStep[];
   issues: Issue[];
+  /** Power Apps maker portal link to the solution, when it could be resolved after import. */
+  solutionUrl?: string;
 }
 
 export interface DeployOptions {
   specText: string;
-  /** Environment URL, display name or id, as listed by `pac env list`. */
+  /** Environment URL, display name or id, as listed by `envs`. */
   environment: string;
-  pac: PacClient;
-  /** Keep the generated solution folder and zip here instead of a temp folder that is removed afterwards. */
+  dataverse: DataverseClient;
+  /** Also write the unpacked solution folder and the zip here, for inspection. */
   outDir?: string;
+  /** Called with a snapshot of the steps whenever one starts, changes or ends. */
+  onProgress?: (steps: DeployStep[]) => void;
 }
 
 /** Exactly one listed environment must match the URL, id or (case-insensitive) display name. */
-export function findEnvironment(environments: readonly PacEnvironment[], value: string): PacEnvironment | 'none' | 'ambiguous' {
+export function findEnvironment(environments: readonly Environment[], value: string): Environment | 'none' | 'ambiguous' {
   const url = normalizeEnvironmentUrl(value);
   const key = value.trim().toLowerCase();
   if (key.length === 0) {
     return 'none';
   }
-  const matches = environments.filter((e) => (url !== undefined && e.url === url) || e.id === key || e.name.toLowerCase() === key);
+  const matches = environments.filter((e) => (url !== undefined && e.url === url) || e.id.toLowerCase() === key || e.name.toLowerCase() === key);
   return matches.length === 1 ? matches[0]! : matches.length === 0 ? 'none' : 'ambiguous';
 }
 
@@ -69,40 +73,61 @@ const fetchXml = (entity: string, attribute: string, filter: string, link = ''):
   `<fetch top="5"><entity name="${entity}"><attribute name="${attribute}" />${filter}${link}</entity></fetch>`;
 
 /** Looks up the SDK message id and any existing step for this expression so redeploys update in place. */
-async function resolveBinding(spec: PluginSpec, environmentUrl: string, pac: PacClient, workDir: string): Promise<AutomatedBinding> {
+async function resolveBinding(spec: PluginSpec, environmentUrl: string, dataverse: DataverseClient): Promise<AutomatedBinding> {
   const trigger = spec.trigger!;
-  const messageFile = join(workDir, 'message.fetch.xml');
-  await writeFile(
-    messageFile,
+  const messages = await dataverse.fetchIds(
+    environmentUrl,
+    'sdkmessages',
     fetchXml('sdkmessage', 'sdkmessageid', `<filter><condition attribute="name" operator="eq" value="${xmlEscape(trigger.message)}" /></filter>`),
-    'utf8',
+    'sdkmessageid',
   );
-  const messages = await pac.fetchGuids(environmentUrl, messageFile, 'sdkmessageid');
-  if (messages === undefined || messages.length !== 1) {
+  if (messages.length !== 1) {
     throw new Error(`Could not resolve a single SDK message id for "${trigger.message}".`);
   }
-  const stepFile = join(workDir, 'step.fetch.xml');
-  await writeFile(
-    stepFile,
+  const steps = await dataverse.fetchIds(
+    environmentUrl,
+    'sdkmessageprocessingsteps',
     fetchXml(
       'sdkmessageprocessingstep',
       'sdkmessageprocessingstepid',
       '',
       `<link-entity name="fxexpression" from="fxexpressionid" to="fxexpressionid"><filter><condition attribute="uniquename" operator="eq" value="${xmlEscape(spec.uniqueName)}" /></filter></link-entity>`,
     ),
-    'utf8',
+    'sdkmessageprocessingstepid',
   );
-  const steps = await pac.fetchGuids(environmentUrl, stepFile, 'sdkmessageprocessingstepid');
-  if (steps === undefined || steps.length > 1) {
+  if (steps.length > 1) {
     throw new Error('More than one existing step is linked to this expression; fix it in the environment before redeploying.');
   }
   return { sdkMessageId: messages[0]!, stepId: steps[0] ?? defaultStepId(spec) };
 }
 
-/** Step 4: check → confirm environment → build solution → pac solution pack → pac solution import. */
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const messageOf = (error: unknown, fallback: string): string => (error instanceof Error ? error.message : fallback);
+
+/** Maker portal link for commercial-cloud environments only; other clouds use different portal hosts. */
+export function solutionPortalUrl(environment: Environment, solutionId: string): string | undefined {
+  const commercial = /\.crm\d*\.dynamics\.com\/$/.test(environment.url) && !/\.crm9\.dynamics\.com\/$/.test(environment.url);
+  return commercial && /^(Default-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(environment.id) && GUID.test(solutionId)
+    ? `https://make.powerapps.com/environments/${environment.id}/solutions/${solutionId}`
+    : undefined;
+}
+
+/** Step 4: check → confirm environment → (automated) resolve ids → build solution → pac solution pack → import. */
 export async function deploy(options: DeployOptions): Promise<DeployResult> {
   const steps: DeployStep[] = [];
-  const result = (status: DeployResult['status'], environment: PacEnvironment | undefined, issues: Issue[] = []): DeployResult => ({
+  const report = (): void => options.onProgress?.(steps.map((s) => ({ ...s })));
+  const begin = (step: string, detail: string): DeployStep => {
+    const entry: DeployStep = { step, status: 'running', detail };
+    steps.push(entry);
+    report();
+    return entry;
+  };
+  const end = (entry: DeployStep, status: StepStatus, detail: string): void => {
+    entry.status = status;
+    entry.detail = detail;
+    report();
+  };
+  const result = (status: DeployResult['status'], environment: Environment | undefined, issues: Issue[] = []): DeployResult => ({
     status,
     environment,
     steps,
@@ -110,16 +135,20 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
   });
 
   const checked = checkSpecText(options.specText);
+  const checkStep = begin('check', 'Checking…');
   if (!checked.ok || checked.spec === undefined) {
-    steps.push({ step: 'check', status: 'blocked', detail: 'Fix the errors reported by check first.' });
+    end(checkStep, 'blocked', 'Fix the errors reported by check first.');
     return result('blocked', undefined, checked.issues);
   }
   const spec = checked.spec;
-  steps.push({ step: 'check', status: 'done', detail: `${checked.issues.length} warning(s).` });
+  end(checkStep, 'done', `${checked.issues.length} warning(s).`);
 
-  const { environments, result: listResult } = await options.pac.environments();
-  if (listResult.code !== 0) {
-    steps.push({ step: 'environment', status: 'blocked', detail: `pac env list failed: ${pacError(listResult.output)}` });
+  const environmentStep = begin('environment', 'Looking up the environment…');
+  let environments: Environment[];
+  try {
+    environments = await options.dataverse.environments();
+  } catch (error) {
+    end(environmentStep, 'blocked', `Could not list environments: ${messageOf(error, 'unknown error')}`);
     return result('blocked', undefined, checked.issues);
   }
   const environment = findEnvironment(environments, options.environment);
@@ -127,47 +156,56 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     const detail =
       environment === 'ambiguous'
         ? 'More than one environment matches; use the environment URL.'
-        : 'Environment is not available to the active pac profile (use a URL, name or id from envs).';
-    steps.push({ step: 'environment', status: 'blocked', detail });
+        : 'Environment is not available to the signed-in account (use a URL, name or id from envs).';
+    end(environmentStep, 'blocked', detail);
     return result('blocked', undefined, checked.issues);
   }
   const url = environment.url;
-  steps.push({ step: 'environment', status: 'done', detail: `${environment.name || environment.url} (type: ${environment.type}).` });
+  end(environmentStep, 'done', `${environment.name || environment.url} (type: ${environment.type}).`);
 
-  const workDir = options.outDir ?? (await mkdtemp(join(tmpdir(), 'dv-native-')));
-  try {
-    await mkdir(workDir, { recursive: true });
-    let binding: AutomatedBinding | undefined;
-    if (spec.kind === 'automated') {
-      try {
-        binding = await resolveBinding(spec, url, options.pac, workDir);
-        steps.push({ step: 'resolve', status: 'done', detail: `Message ${spec.trigger!.message} → step ${binding.stepId}.` });
-      } catch (error) {
-        steps.push({ step: 'resolve', status: 'failed', detail: error instanceof Error ? error.message : 'Lookup failed.' });
-        return result('failed', environment, checked.issues);
-      }
-    }
-
-    const folder = join(workDir, 'solution');
-    const zip = join(workDir, `${spec.solution.uniqueName}.zip`);
-    await writeSolutionFolder(buildSolutionFiles(spec, binding), folder);
-    const packed = await options.pac.pack(folder, zip);
-    if (packed.code !== 0) {
-      steps.push({ step: 'pack', status: 'failed', detail: lastLines(packed.output) });
+  let binding: AutomatedBinding | undefined;
+  if (spec.kind === 'automated') {
+    const resolveStep = begin('resolve', `Looking up the ${spec.trigger!.message} message and any existing step…`);
+    try {
+      binding = await resolveBinding(spec, url, options.dataverse);
+      end(resolveStep, 'done', `Message ${spec.trigger!.message} → step ${binding.stepId}.`);
+    } catch (error) {
+      end(resolveStep, 'failed', messageOf(error, 'Lookup failed.'));
       return result('failed', environment, checked.issues);
-    }
-    steps.push({ step: 'pack', status: 'done', detail: options.outDir === undefined ? 'Solution packed.' : zip });
-
-    const imported = await options.pac.importSolution(url, zip);
-    if (imported.code !== 0) {
-      steps.push({ step: 'import', status: 'failed', detail: lastLines(imported.output) });
-      return result('failed', environment, checked.issues);
-    }
-    steps.push({ step: 'import', status: 'done', detail: `Imported into ${spec.solution.uniqueName}.` });
-    return result('succeeded', environment, checked.issues);
-  } finally {
-    if (options.outDir === undefined) {
-      await rm(workDir, { recursive: true, force: true });
     }
   }
+
+  const packStep = begin('pack', 'Packing the solution…');
+  let zip: Buffer;
+  try {
+    const files = buildSolutionFiles(spec, binding);
+    zip = packSolution(files);
+    if (options.outDir !== undefined) {
+      await writeSolutionFolder(files, join(options.outDir, 'solution'));
+      await writeFile(join(options.outDir, `${spec.solution.uniqueName}.zip`), zip);
+    }
+  } catch (error) {
+    end(packStep, 'failed', messageOf(error, 'Packing failed.'));
+    return result('failed', environment, checked.issues);
+  }
+  end(packStep, 'done', options.outDir === undefined ? `Solution packed (${zip.length} bytes).` : join(options.outDir, `${spec.solution.uniqueName}.zip`));
+
+  const importStep = begin('import', 'Uploading the solution…');
+  try {
+    const imported = await options.dataverse.importSolution(url, zip, (detail) => {
+      importStep.detail = detail;
+      report();
+    });
+    if (!imported.ok) {
+      end(importStep, 'failed', imported.detail);
+      return result('failed', environment, checked.issues);
+    }
+  } catch (error) {
+    end(importStep, 'failed', messageOf(error, 'Import failed.'));
+    return result('failed', environment, checked.issues);
+  }
+  end(importStep, 'done', `Imported into ${spec.solution.uniqueName}.`);
+  const solutionId = await options.dataverse.solutionId(url, spec.solution.uniqueName).catch(() => undefined);
+  const solutionUrl = solutionId === undefined ? undefined : solutionPortalUrl(environment, solutionId);
+  return { ...result('succeeded', environment, checked.issues), ...(solutionUrl === undefined ? {} : { solutionUrl }) };
 }

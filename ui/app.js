@@ -11,22 +11,43 @@ const eLoadError = document.getElementById('load-error');
 const eCheckBadge = document.getElementById('check-badge');
 const eCheckStatus = document.getElementById('check-status');
 const eIssueList = document.getElementById('issue-list');
-const ePacStatus = document.getElementById('pac-status');
-const eProfileList = document.getElementById('profile-list');
+const eAccountStatus = document.getElementById('account-status');
+const eSignInLink = document.getElementById('sign-in-link');
+const eProfileField = document.getElementById('profile-field');
+const eProfileSelect = document.getElementById('profile-select');
+const eConnectionPill = document.getElementById('connection-pill');
+const eLoginButton = document.getElementById('btn-login');
+const eReconnectButton = document.getElementById('btn-reconnect');
+const eCancelLoginButton = document.getElementById('btn-cancel-login');
+const eRemoveProfileButton = document.getElementById('btn-remove-profile');
+const eEnvSection = document.getElementById('env-section');
+const eEnvSearch = document.getElementById('env-search');
+const eEnvStatus = document.getElementById('env-status');
 const eEnvList = document.getElementById('env-list');
 const eDeploySummary = document.getElementById('deploy-summary');
 const eDeployStatus = document.getElementById('deploy-status');
 const eDeploySteps = document.getElementById('deploy-steps');
+const eSolutionLink = document.getElementById('solution-link');
 const eConfirmDialog = document.getElementById('confirm-dialog');
+
+const sSignInOrigin = 'https://login.microsoftonline.com/';
+const sMakerPortalOrigin = 'https://make.powerapps.com/';
 
 const oState = {
   oMeta: { parameterTypes: [], messages: [], stages: [], examples: [] },
   bUniqueNameTouched: false,
   sLastCheckedText: '',
   oLastCheck: null,
+  oSession: null,
   aEnvironments: [],
+  bEnvironmentsLoaded: false,
+  bEnvironmentsLoading: false,
   sEnvironmentUrl: '',
   iCheckTimer: 0,
+  iSessionTimer: 0,
+  iDeployTimer: 0,
+  iDeployStartedAt: 0,
+  bDeploying: false,
 };
 
 // ---------- session + API ----------
@@ -75,6 +96,17 @@ function field(sName) {
   return eForm.elements.namedItem(sName);
 }
 
+/** Status text; bBusy shows a spinner so long waits don't look frozen. */
+function setStatus(eElement, sText, bBusy = false) {
+  eElement.textContent = sText;
+  eElement.classList.toggle('busy', bBusy);
+}
+
+function formatElapsed(iMilliseconds) {
+  const iSeconds = Math.floor(iMilliseconds / 1000);
+  return `${Math.floor(iSeconds / 60)}:${String(iSeconds % 60).padStart(2, '0')}`;
+}
+
 // ---------- theme ----------
 
 function applyTheme(sTheme) {
@@ -94,7 +126,7 @@ function showStep(sStep) {
     ePanel.hidden = ePanel.id !== `panel-${sStep}`;
   });
   if (sStep === '2') runCheck();
-  if (sStep === '3' && oState.aEnvironments.length === 0) refreshEnvironments();
+  if (sStep === '3') refreshSession();
   if (sStep === '4') renderDeploySummary();
 }
 
@@ -323,87 +355,183 @@ function renderCheck(oResult) {
   );
 }
 
-// ---------- step 3: environment ----------
+// ---------- step 3: sign-in + environment ----------
 
-function renderProfiles(aProfiles) {
-  if (aProfiles.length === 0) {
-    eProfileList.replaceChildren(createElement('li', 'muted', 'No pac profiles yet. Use "Sign in with pac…".'));
-    return;
-  }
-  eProfileList.replaceChildren(
-    ...aProfiles.map((oProfile) => {
-      const eItem = createElement('li', oProfile.active ? 'card selected' : 'card');
-      eItem.append(createElement('strong', '', oProfile.user || 'unknown user'), createElement('span', 'muted', ` ${oProfile.environment || ''}`));
-      if (!oProfile.active) {
-        const eUse = createElement('button', 'ghost', 'Use');
-        eUse.type = 'button';
-        eUse.addEventListener('click', () => selectProfile(oProfile.index));
-        eItem.append(eUse);
-      } else {
-        eItem.append(createElement('em', 'badge ok', 'active'));
-      }
-      return eItem;
-    }),
+const sAddProfileValue = '__add';
+
+function profileLabel(oProfile) {
+  const sName = oProfile.name && oProfile.name !== oProfile.username ? `${oProfile.name} (${oProfile.username})` : oProfile.username;
+  return oProfile.needsReauth ? `${sName} — sign-in expired` : sName;
+}
+
+function renderProfiles(oSession) {
+  const aProfiles = oSession.profiles ?? [];
+  eProfileField.hidden = aProfiles.length === 0;
+  eProfileSelect.disabled = oSession.state === 'pending';
+  eProfileSelect.replaceChildren(
+    ...aProfiles.map((oProfile) => new Option(profileLabel(oProfile), oProfile.id, false, oProfile.id === oSession.active?.id)),
+    new Option('+ Add another account…', sAddProfileValue),
   );
 }
 
+function setConnection(sText, sClassName) {
+  eConnectionPill.hidden = sText === '';
+  eConnectionPill.textContent = sText;
+  eConnectionPill.className = `badge ${sClassName}`;
+}
+
+function renderConnection() {
+  const oSession = oState.oSession;
+  const oActive = oSession?.state === 'signed-in' ? oSession.active : undefined;
+  eReconnectButton.hidden = !oActive?.needsReauth;
+  if (!oActive) setConnection('', '');
+  else if (oActive.needsReauth) setConnection('Sign-in expired', 'warn');
+  else if (oState.bEnvironmentsLoading) setConnection('Checking…', '');
+  else if (oState.bEnvironmentsLoaded) setConnection('Connected', 'ok');
+  else setConnection('', '');
+}
+
+function applySession(oSession) {
+  const sPreviousProfile = oState.oSession?.state === 'signed-in' ? oState.oSession.active?.id : undefined;
+  oState.oSession = oSession;
+  window.clearTimeout(oState.iSessionTimer);
+  const bPending = oSession.state === 'pending';
+  const bSignedIn = oSession.state === 'signed-in';
+  const oActive = oSession.active;
+
+  renderProfiles(oSession);
+  eSignInLink.hidden = !(bPending && typeof oSession.authorizeUrl === 'string' && oSession.authorizeUrl.startsWith(sSignInOrigin));
+  if (!eSignInLink.hidden) eSignInLink.href = oSession.authorizeUrl;
+  eLoginButton.hidden = bPending || (oSession.profiles ?? []).length > 0;
+  eCancelLoginButton.hidden = !bPending;
+  eRemoveProfileButton.hidden = !bSignedIn;
+  eEnvSection.hidden = !bSignedIn;
+
+  if (bPending) {
+    setStatus(eAccountStatus, 'Waiting for you to finish signing in in your browser…', true);
+    oState.iSessionTimer = window.setTimeout(refreshSession, 1500);
+  } else if (oSession.error) {
+    setStatus(eAccountStatus, `Sign-in failed: ${oSession.error}`);
+  } else if (!bSignedIn) {
+    setStatus(eAccountStatus, 'Sign in with your work account to list the environments you can deploy to.');
+  } else {
+    setStatus(eAccountStatus, '');
+  }
+
+  if (!bSignedIn || sPreviousProfile !== oActive?.id) {
+    oState.aEnvironments = [];
+    oState.bEnvironmentsLoaded = false;
+    oState.sEnvironmentUrl = '';
+    eEnvList.replaceChildren();
+  }
+  if (bSignedIn && oActive?.needsReauth) {
+    setStatus(eEnvStatus, `The saved sign-in for ${oActive.username} has expired. Reconnect to load environments.`);
+  } else if (bSignedIn && !oState.bEnvironmentsLoaded && !oState.bEnvironmentsLoading) {
+    loadEnvironments();
+  }
+  renderConnection();
+}
+
+async function refreshSession() {
+  try {
+    applySession(await callApi('/api/studio/session'));
+  } catch (oError) {
+    setStatus(eAccountStatus, `Could not read the sign-in state: ${oError.message}`);
+  }
+}
+
+async function sessionAction(sPath, oBody, sBusyText) {
+  if (sBusyText) setStatus(eAccountStatus, sBusyText, true);
+  try {
+    applySession(await callApi(sPath, oBody));
+  } catch (oError) {
+    await refreshSession();
+    setStatus(eAccountStatus, oError.message);
+  }
+}
+
+function signIn(oOptions = {}) {
+  return sessionAction('/api/studio/login', oOptions, 'Opening the sign-in page…');
+}
+
+function onProfileChange() {
+  const sValue = eProfileSelect.value;
+  if (sValue === sAddProfileValue) {
+    renderProfiles(oState.oSession);
+    signIn({ selectAccount: true });
+    return;
+  }
+  sessionAction('/api/studio/profiles/select', { id: sValue }, 'Switching profile…');
+}
+
+async function removeProfile() {
+  const oActive = oState.oSession?.active;
+  if (!oActive || !window.confirm(`Forget the saved sign-in for ${oActive.username} on this computer?`)) return;
+  await sessionAction('/api/studio/profiles/remove', { id: oActive.id }, '');
+}
+
+function environmentMatches(oEnvironment, sQuery) {
+  return [oEnvironment.name, oEnvironment.url, oEnvironment.type].some((sValue) => sValue.toLowerCase().includes(sQuery));
+}
+
 function renderEnvironments() {
+  if (oState.bEnvironmentsLoading) return;
   if (oState.aEnvironments.length === 0) {
-    eEnvList.replaceChildren(createElement('li', 'muted', 'No environments found for the active profile.'));
+    eEnvList.replaceChildren(oState.bEnvironmentsLoaded ? createElement('li', 'muted', 'No Dataverse environments found for this account.') : '');
+    return;
+  }
+  const sQuery = eEnvSearch.value.trim().toLowerCase();
+  const aVisible = oState.aEnvironments.filter((oEnvironment) => environmentMatches(oEnvironment, sQuery));
+  setStatus(eEnvStatus, sQuery ? `Showing ${aVisible.length} of ${oState.aEnvironments.length} environments.` : `${oState.aEnvironments.length} environments.`);
+  if (aVisible.length === 0) {
+    eEnvList.replaceChildren(createElement('li', 'muted', 'No environments match the search.'));
     return;
   }
   eEnvList.replaceChildren(
-    ...oState.aEnvironments.map((oEnvironment) => {
+    ...aVisible.map((oEnvironment) => {
       const bProduction = oEnvironment.type === 'Production' || oEnvironment.type === 'Default';
-      const eItem = createElement('li', `card clickable${oEnvironment.url === oState.sEnvironmentUrl ? ' selected' : ''}`);
-      eItem.append(
-        createElement('strong', '', oEnvironment.name || oEnvironment.url),
-        createElement('em', `badge ${bProduction ? 'warn' : ''}`, oEnvironment.type),
-        createElement('span', 'muted url', oEnvironment.url),
-      );
-      eItem.addEventListener('click', () => {
+      const bSelected = oEnvironment.url === oState.sEnvironmentUrl;
+      const eItem = createElement('li', `card clickable${bSelected ? ' selected' : ''}`);
+      eItem.tabIndex = 0;
+      eItem.setAttribute('role', 'option');
+      eItem.setAttribute('aria-selected', String(bSelected));
+      const eType = createElement('em', `badge ${bProduction ? 'warn' : ''}`, oEnvironment.type);
+      eType.title = 'Environment type from Power Platform';
+      eItem.append(createElement('strong', '', oEnvironment.name || oEnvironment.url), eType, createElement('span', 'muted url', oEnvironment.url));
+      const selectEnvironment = () => {
         oState.sEnvironmentUrl = oEnvironment.url;
         renderEnvironments();
+      };
+      eItem.addEventListener('click', selectEnvironment);
+      eItem.addEventListener('keydown', (oEvent) => {
+        if (oEvent.key === 'Enter' || oEvent.key === ' ') {
+          oEvent.preventDefault();
+          selectEnvironment();
+        }
       });
       return eItem;
     }),
   );
 }
 
-async function refreshEnvironments() {
-  ePacStatus.textContent = 'Asking pac…';
+async function loadEnvironments() {
+  oState.bEnvironmentsLoading = true;
+  renderConnection();
+  eEnvList.replaceChildren();
+  setStatus(eEnvStatus, 'Loading environments…', true);
   try {
-    const oProfiles = await callApi('/api/studio/profiles');
-    renderProfiles(oProfiles.profiles);
-    const oEnvironments = await callApi('/api/studio/environments');
-    oState.aEnvironments = oEnvironments.environments;
+    const oResult = await callApi('/api/studio/environments');
+    oState.aEnvironments = oResult.environments;
+    oState.bEnvironmentsLoaded = !oResult.error;
+    oState.bEnvironmentsLoading = false;
     renderEnvironments();
-    ePacStatus.textContent = oEnvironments.error ? `pac: ${oEnvironments.error}` : '';
+    if (oResult.error) setStatus(eEnvStatus, `Could not load environments: ${oResult.error}`);
+    if (oResult.signInRequired) await refreshSession();
   } catch (oError) {
-    ePacStatus.textContent = oError.message;
+    oState.bEnvironmentsLoading = false;
+    setStatus(eEnvStatus, `Could not load environments: ${oError.message}`);
   }
-}
-
-async function signIn() {
-  ePacStatus.textContent = 'Complete the sign-in in your browser…';
-  try {
-    const oResult = await callApi('/api/studio/login', {});
-    renderProfiles(oResult.profiles);
-    ePacStatus.textContent = oResult.ok ? 'Signed in.' : `Sign-in failed: ${oResult.output}`;
-    if (oResult.ok) await refreshEnvironments();
-  } catch (oError) {
-    ePacStatus.textContent = oError.message;
-  }
-}
-
-async function selectProfile(iIndex) {
-  try {
-    await callApi('/api/studio/select', { index: iIndex });
-    oState.sEnvironmentUrl = '';
-    await refreshEnvironments();
-  } catch (oError) {
-    ePacStatus.textContent = oError.message;
-  }
+  renderConnection();
 }
 
 // ---------- step 4: deploy ----------
@@ -423,9 +551,11 @@ function renderDeploySummary() {
     ['Environment', oEnvironment ? `${oEnvironment.name} · ${oEnvironment.url}` : 'none selected'],
   ];
   eDeploySummary.replaceChildren(...aRows.flatMap(([sTerm, sValue]) => [createElement('dt', '', sTerm), createElement('dd', '', sValue)]));
+  if (oState.bDeploying) return;
   const bReady = Boolean(oEnvironment) && oState.oLastCheck?.ok === true && oState.sLastCheckedText === specText();
   document.getElementById('btn-deploy').disabled = !bReady;
-  eDeployStatus.textContent = bReady ? '' : 'Pass the check and select an environment first.';
+  if (!bReady) setStatus(eDeployStatus, 'Pass the check and select an environment first.');
+  else if (eDeploySteps.childElementCount === 0) setStatus(eDeployStatus, '');
 }
 
 function askConfirmation(sMessage) {
@@ -436,6 +566,53 @@ function askConfirmation(sMessage) {
   });
 }
 
+function renderDeploySteps(aSteps) {
+  eDeploySteps.replaceChildren(
+    ...aSteps.map((oStep) => {
+      const eItem = createElement('li', oStep.status);
+      const eTitle = createElement('strong', oStep.status === 'running' ? 'status busy' : '', `${oStep.step}: ${oStep.status}`);
+      eItem.append(eTitle, createElement('pre', '', oStep.detail));
+      return eItem;
+    }),
+  );
+}
+
+function showSolutionLink(sUrl) {
+  const bValid = typeof sUrl === 'string' && sUrl.startsWith(sMakerPortalOrigin);
+  eSolutionLink.hidden = !bValid;
+  if (bValid) eSolutionLink.href = sUrl;
+}
+
+function finishDeploy(oJob) {
+  window.clearTimeout(oState.iDeployTimer);
+  oState.bDeploying = false;
+  document.getElementById('btn-deploy').disabled = false;
+  const oResult = oJob.result;
+  if (!oResult) {
+    setStatus(eDeployStatus, `Deploy failed: ${oJob.error ?? 'no result.'}`);
+    return;
+  }
+  renderDeploySteps(oResult.steps);
+  setStatus(eDeployStatus, `Deploy ${oResult.status} after ${formatElapsed(Date.now() - oState.iDeployStartedAt)}.`);
+  showSolutionLink(oResult.solutionUrl);
+}
+
+async function pollDeploy() {
+  try {
+    const oJob = await callApi('/api/studio/deploy');
+    renderDeploySteps(oJob.steps);
+    if (!oJob.running) {
+      finishDeploy(oJob);
+      return;
+    }
+    const oRunning = oJob.steps.find((oStep) => oStep.status === 'running');
+    setStatus(eDeployStatus, `Deploying… ${formatElapsed(Date.now() - oState.iDeployStartedAt)}${oRunning ? ` · ${oRunning.step}` : ''}`, true);
+  } catch (oError) {
+    setStatus(eDeployStatus, `Lost track of the deploy (${oError.message}); retrying…`, true);
+  }
+  oState.iDeployTimer = window.setTimeout(pollDeploy, 1000);
+}
+
 async function runDeploy() {
   const oEnvironment = selectedEnvironment();
   if (!oEnvironment) return;
@@ -443,21 +620,18 @@ async function runDeploy() {
   if (!bConfirmed) return;
   const eButton = document.getElementById('btn-deploy');
   eButton.disabled = true;
+  oState.bDeploying = true;
   eDeploySteps.replaceChildren();
-  eDeployStatus.textContent = 'Deploying… solution import can take a few minutes.';
+  showSolutionLink('');
+  oState.iDeployStartedAt = Date.now();
+  setStatus(eDeployStatus, 'Deploying… solution import can take a few minutes.', true);
   try {
-    const oResult = await callApi('/api/studio/deploy', { spec: specText(), environmentUrl: oEnvironment.url, confirmEnvironmentUrl: oEnvironment.url });
-    eDeployStatus.textContent = `Deploy ${oResult.status}.`;
-    eDeploySteps.replaceChildren(
-      ...oResult.steps.map((oStep) => {
-        const eItem = createElement('li', oStep.status);
-        eItem.append(createElement('strong', '', `${oStep.step}: ${oStep.status}`), createElement('pre', '', oStep.detail));
-        return eItem;
-      }),
-    );
+    const oJob = await callApi('/api/studio/deploy', { spec: specText(), environmentUrl: oEnvironment.url, confirmEnvironmentUrl: oEnvironment.url });
+    renderDeploySteps(oJob.steps);
+    oState.iDeployTimer = window.setTimeout(pollDeploy, 1000);
   } catch (oError) {
-    eDeployStatus.textContent = `Deploy failed: ${oError.message}`;
-  } finally {
+    setStatus(eDeployStatus, `Deploy failed: ${oError.message}`);
+    oState.bDeploying = false;
     eButton.disabled = false;
   }
 }
@@ -496,8 +670,13 @@ function bindEvents() {
     oState.sLastCheckedText = '';
     runCheck();
   });
-  document.getElementById('btn-refresh').addEventListener('click', refreshEnvironments);
-  document.getElementById('btn-login').addEventListener('click', signIn);
+  document.getElementById('btn-refresh').addEventListener('click', loadEnvironments);
+  eEnvSearch.addEventListener('input', renderEnvironments);
+  eLoginButton.addEventListener('click', () => signIn());
+  eReconnectButton.addEventListener('click', () => signIn({ reconnect: true }));
+  eCancelLoginButton.addEventListener('click', () => sessionAction('/api/studio/login/cancel', {}, ''));
+  eRemoveProfileButton.addEventListener('click', removeProfile);
+  eProfileSelect.addEventListener('change', onProfileChange);
   document.getElementById('btn-deploy').addEventListener('click', runDeploy);
 }
 

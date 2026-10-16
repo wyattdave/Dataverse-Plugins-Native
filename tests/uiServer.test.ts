@@ -3,8 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { startUiServer, type UiServer } from '../src/ui/server.js';
-import type { PacRunner } from '../src/studio/pac.js';
-import { examplePath } from './helpers.js';
+import { ENV_URL, examplePath, fakeAuth, fakeBrowser, fakeDataverse, fakePlatform } from './helpers.js';
 
 interface RawResponse {
   status: number;
@@ -30,25 +29,15 @@ function call(port: number, path: string, options: { method?: string; headers?: 
   });
 }
 
-describe('local UI server (fake pac)', () => {
+describe('local UI server (fake sign-in and Dataverse)', () => {
   let server: UiServer;
   let token: string;
-  const pacCalls: string[][] = [];
-  const ENV_URL = 'https://contoso-dev.crm.dynamics.com/';
-  const pacRunner: PacRunner = async (args) => {
-    pacCalls.push([...args]);
-    const key = `${args[0]} ${args[1]}`;
-    if (key === 'env list') {
-      return { code: 0, output: `*  Contoso Dev  11111111-2222-3333-4444-555555555555 ${ENV_URL} unq1 Sandbox\n` };
-    }
-    if (key === 'auth list') {
-      return { code: 0, output: `[1] * UNIVERSAL maker@contoso.com Public User Contoso Dev ${ENV_URL}\n` };
-    }
-    return { code: 0, output: 'ok' };
-  };
+  const platform = fakePlatform();
+  const browser = fakeBrowser();
 
   before(async () => {
-    server = await startUiServer({ port: 0, pacRunner });
+    const auth = fakeAuth(platform.fetch, browser.openUrl);
+    server = await startUiServer({ port: 0, auth, dataverse: fakeDataverse(platform.fetch, auth) });
     token = new URL(server.launchUrl).searchParams.get('session')!;
   });
   after(async () => server.close());
@@ -113,21 +102,53 @@ describe('local UI server (fake pac)', () => {
     assert.equal(broken.ok, false);
   });
 
-  it('lists profiles and environments through pac', async () => {
+  it('signs in through the browser, then lists environments with their type', async () => {
+    const signedOut = JSON.parse((await get('/api/studio/environments')).body) as { environments: unknown[]; signInRequired: boolean };
+    assert.deepEqual(signedOut.environments, []);
+    assert.equal(signedOut.signInRequired, true);
+    assert.equal((await post('/api/studio/login', { selectAccount: 'yes' })).status, 400);
+    const started = JSON.parse((await post('/api/studio/login', {})).body) as { state: string; authorizeUrl: string };
+    assert.ok(['pending', 'signed-in'].includes(started.state));
+    assert.equal(browser.opened.length, 1);
+    let session = { state: '' } as { state: string; active?: { id: string; username: string } };
+    for (let i = 0; i < 50 && session.state !== 'signed-in'; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      session = JSON.parse((await get('/api/studio/session')).body) as typeof session;
+    }
+    assert.equal(session.active?.username, 'maker@contoso.com');
+    assert.ok(!/token-for|refresh-/.test(JSON.stringify(session)), 'tokens never reach the page');
     const envs = JSON.parse((await get('/api/studio/environments')).body) as { environments: { url: string; type: string }[] };
-    assert.deepEqual(envs.environments.map((e) => [e.url, e.type]), [[ENV_URL, 'Sandbox']]);
-    const profiles = JSON.parse((await get('/api/studio/profiles')).body) as { profiles: { user: string }[] };
-    assert.equal(profiles.profiles[0]?.user, 'maker@contoso.com');
+    assert.deepEqual(envs.environments.map((e) => [e.url, e.type]), [
+      ['https://orgdefault.crm.dynamics.com/', 'Default'],
+      [ENV_URL, 'Sandbox'],
+      ['https://contoso.crm.dynamics.com/', 'Production'],
+    ]);
   });
 
-  it('deploys only with an exactly confirmed environment URL', async () => {
+  it('deploys in the background, only with an exactly confirmed environment URL', async () => {
     const spec = await readFile(examplePath('instant.plugin.json'), 'utf8');
-    pacCalls.length = 0;
     assert.equal((await post('/api/studio/deploy', { spec, environmentUrl: ENV_URL, confirmEnvironmentUrl: 'https://other.crm.dynamics.com/' })).status, 400);
     assert.equal((await post('/api/studio/deploy', { spec, environmentUrl: ENV_URL })).status, 400);
-    assert.equal(pacCalls.length, 0);
-    const result = JSON.parse((await post('/api/studio/deploy', { spec, environmentUrl: ENV_URL, confirmEnvironmentUrl: ENV_URL })).body) as { status: string };
-    assert.equal(result.status, 'succeeded');
-    assert.ok(pacCalls.some((c) => c[0] === 'solution' && c[1] === 'import'));
+    assert.ok(!platform.calls.some((c) => c.method === 'POST' && c.url.includes('/api/data/')));
+    const started = await post('/api/studio/deploy', { spec, environmentUrl: ENV_URL, confirmEnvironmentUrl: ENV_URL });
+    assert.equal(started.status, 202);
+    let job = { running: true } as { running: boolean; result?: { status: string; solutionUrl?: string } };
+    for (let i = 0; i < 100 && job.running; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      job = JSON.parse((await get('/api/studio/deploy')).body) as typeof job;
+    }
+    assert.equal(job.result?.status, 'succeeded', JSON.stringify(job));
+    assert.match(job.result?.solutionUrl ?? '', /^https:\/\/make\.powerapps\.com\/environments\//);
+    assert.ok(platform.calls.some((c) => c.url.endsWith('/ImportSolutionAsync')));
+  });
+
+  it('selects and forgets profiles', async () => {
+    const session = JSON.parse((await get('/api/studio/session')).body) as { active: { id: string } };
+    assert.equal((await post('/api/studio/profiles/select', { id: 'unknown.profile' })).status, 404);
+    assert.equal((await post('/api/studio/profiles/select', { id: session.active.id })).status, 200);
+    const removed = JSON.parse((await post('/api/studio/profiles/remove', { id: session.active.id })).body) as { state: string; profiles: unknown[] };
+    assert.equal(removed.state, 'signed-out');
+    assert.deepEqual(removed.profiles, []);
+    assert.equal((JSON.parse((await get('/api/studio/environments')).body) as { signInRequired: boolean }).signInRequired, true);
   });
 });

@@ -8,13 +8,16 @@ exactly one JSON object, and errors are returned as `{ "error": "…" }`. `<comm
 | 1 | `new --kind instant\|automated --out <file> [settings]` | Writes a starter spec with the settings applied. Never overwrites. | 0 / 3 |
 | 1 | `set --spec <file> [settings]` | Applies settings to an existing spec (atomic replace). Invalid option values leave the file untouched. | 0 / 3 |
 | 2 | `check --spec <file>` | Strict spec rules + offline Power Fx syntax check. Does not evaluate the formula. | 0 pass / 3 errors |
-| 3 | `login` | `pac auth create` (browser sign-in by the user). | 0 / 3 |
-| 3 | `envs [--select <index>]` | `pac auth list` + `pac env list`. `--select` runs `pac auth select --index` first. | 0 / 3 |
-| 4 | `deploy --spec <file> --environment <url\|name\|id>` | check → environment must be listed by `pac env list` (exactly one match) → (automated) resolve message id and existing step via `pac env fetch` → build solution → `pac solution pack` → `pac solution import`. | 0 / 2 blocked / 3 failed |
+| 3 | `login [--select-account]` | Browser sign-in; the account is remembered as a profile and becomes active. `--select-account` shows the account picker to add another account. | 0 / 3 |
+| 3 | `envs [--profile <username\|id>]` | Lists remembered profiles and the Dataverse environments (with type) from the Power Platform API. `--profile` switches the active profile. Signs in first if there is no profile. | 0 / 3 |
+| 4 | `deploy --spec <file> --environment <url\|name\|id> [--profile …]` | check → environment must be listed (exactly one match) → (automated) resolve message id and existing step via Web API FetchXML → build and pack the solution → `ImportSolutionAsync` + poll → maker portal link to the solution. | 0 / 2 blocked / 3 failed |
 | – | `ui [--port <n>] [--open]` | The same steps in a localhost-only browser UI. | 0 on stop |
 
 `new` and `set` print the check result too, so mistakes show up immediately; they still exit `0` when the file was
 written.
+
+If the active profile's saved sign-in has expired, `envs` and `deploy` re-open the browser once (with the account
+pre-filled) and retry.
 
 ## Settings (`new` / `set`)
 
@@ -64,6 +67,8 @@ For the bundled UI only. Every endpoint requires the `X-DV-Session` header plus 
 | `GET /api/examples/<name>` | Content of `instant.plugin.json` or `automated.plugin.json`. |
 | `GET /api/studio/meta` | Tool version, parameter types, trigger messages/stages, example names. |
 | `POST /api/studio/check` | `{ "spec" }` → `{ ok, issues }`. Offline. |
-| `GET /api/studio/profiles` · `POST /api/studio/login` · `POST /api/studio/select` | pac profiles, `pac auth create`, `pac auth select { index }`. |
-| `GET /api/studio/environments` | `pac env list`. |
-| `POST /api/studio/deploy` | `{ "spec", "environmentUrl", "confirmEnvironmentUrl" }`; both URLs must match exactly. pac calls are serialized (409 while busy). |
+| `GET /api/studio/session` | `{ state: signed-out\|pending\|signed-in, active?, profiles[], authorizeUrl?, error? }`; profiles carry `needsReauth`. Never contains tokens. |
+| `POST /api/studio/login` · `POST /api/studio/login/cancel` | `{ selectAccount?, reconnect? }` starts a browser sign-in (opened by the server; `authorizeUrl` is the fallback link). `{}` cancels. |
+| `POST /api/studio/profiles/select` · `POST /api/studio/profiles/remove` | `{ id }` switches the active profile / forgets a profile. |
+| `GET /api/studio/environments` | `{ environments }`, or `{ environments: [], error, signInRequired }`. |
+| `POST /api/studio/deploy` · `GET /api/studio/deploy` | `{ "spec", "environmentUrl", "confirmEnvironmentUrl" }`; both URLs must match exactly. Starts in the background (202, 409 while one is running); poll `GET` for `{ running, steps, result? }`. |

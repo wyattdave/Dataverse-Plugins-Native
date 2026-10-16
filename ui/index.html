@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>dv-native · low-code plug-ins</title>
+    <title>DV-Native · low-code plug-ins and Functions</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">dv-native <span id="tool-version" class="muted"></span></div>
+      <div class="brand">Dataverse Plugins Native<span id="tool-version" class="muted"></span></div>
       <nav class="stepper" aria-label="Steps">
         <button type="button" class="step active" data-step="1"><span>1</span> Function</button>
         <button type="button" class="step" data-step="2"><span>2</span> Check <em id="check-badge" class="badge">–</em></button>
@@ -102,16 +102,28 @@
       </section>
 
       <section class="panel" id="panel-3" aria-label="Select environment" hidden>
-        <div class="toolbar">
-          <button type="button" id="btn-refresh">Refresh</button>
-          <button type="button" id="btn-login">Sign in with pac…</button>
-          <span id="pac-status" class="muted"></span>
+        <div class="account" id="account-bar">
+          <label id="profile-field" class="inline" hidden>Profile
+            <select id="profile-select" aria-label="Profile"></select>
+          </label>
+          <em id="connection-pill" class="badge" hidden></em>
+          <span id="account-status" class="status" role="status" aria-live="polite"></span>
+          <a id="sign-in-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the sign-in page</a>
+          <span class="spacer"></span>
+          <button type="button" id="btn-login" class="primary">Sign in…</button>
+          <button type="button" id="btn-reconnect" class="primary" hidden>Reconnect…</button>
+          <button type="button" id="btn-cancel-login" hidden>Cancel</button>
+          <button type="button" id="btn-remove-profile" class="ghost" title="Forget this profile on this computer" hidden>Remove</button>
         </div>
-        <h3>Profiles</h3>
-        <ul id="profile-list" class="cards"></ul>
-        <h3>Environments</h3>
-        <ul id="env-list" class="cards"></ul>
-        <p class="hint">Uses the Power Platform CLI sign-in. Deploy asks you to confirm the environment.</p>
+        <div id="env-section" hidden>
+          <div class="toolbar">
+            <input type="search" id="env-search" placeholder="Search by name, URL or type" aria-label="Search environments" />
+            <button type="button" id="btn-refresh">Refresh</button>
+          </div>
+          <p id="env-status" class="status muted" role="status" aria-live="polite"></p>
+          <ul id="env-list" class="cards" role="listbox" aria-label="Environments"></ul>
+        </div>
+        <p class="hint">Signs in with your Microsoft work account the same way the Power Apps CLI does; nothing else needs installing. Profiles are remembered on this computer (encrypted for your Windows user). Deploy asks you to confirm the environment.</p>
         <div class="nav"><button type="button" data-goto="2">← Back</button><button type="button" class="primary" data-goto="4">Next: deploy →</button></div>
       </section>
 
@@ -119,12 +131,22 @@
         <dl id="deploy-summary" class="summary"></dl>
         <div class="toolbar">
           <button type="button" id="btn-deploy" class="primary">Deploy…</button>
-          <span id="deploy-status" class="muted"></span>
+          <span id="deploy-status" class="status muted" role="status" aria-live="polite"></span>
+          <a id="solution-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open the solution in Power Apps ↗</a>
         </div>
         <ol id="deploy-steps" class="steps"></ol>
         <div class="nav"><button type="button" data-goto="3">← Back</button></div>
       </section>
     </main>
+
+    <footer class="site-footer">
+      <p>Copyright © 2026. All Rights Reserved.</p>
+      <nav class="footer-links" aria-label="Author links">
+        <a href="https://wyattdave.com" target="_blank" rel="noopener noreferrer">WyattDave</a>
+        <a href="https://wyattdave.com" target="_blank" rel="noopener noreferrer">WyattDaveDev</a>
+        <a href="https://www.linkedin.com/in/wyattdave/" target="_blank" rel="noopener noreferrer">LowCodeDev</a>
+      </nav>
+    </footer>
 
     <dialog id="confirm-dialog">
       <form method="dialog">
