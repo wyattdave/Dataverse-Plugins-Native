@@ -4,7 +4,7 @@
 **Audience:** GitHub Copilot and the developer reviewing its changes  
 **Evidence cutoff:** 2026-10-15  
 **Document status:** implementation handoff, not an implemented or supported deployment protocol  
-**Filename:** `requierments.md` — retain this spelling.
+**Filename:** `requirements.md` 
 
 ## 1. Start here: the decision and the first useful deliverable
 
