@@ -141,7 +141,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       sendFailure(res, 403, 'Origin not allowed.');
       return;
     }
-    if (!tokenMatches(req.headers['x-dv-session'])) {
+    if (!tokenMatches(req.headers['x-dataverse-plugins-native-session'])) {
       sendFailure(res, 401, 'Session token missing or invalid.');
       return;
     }

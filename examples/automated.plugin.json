@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "dv-native.plugin/v1",
+  "schemaVersion": "dataverse-plugins-native.plugin/v1",
   "kind": "automated",
   "uniqueName": "sample_AccountNameRequired",
   "displayName": "Account name required",

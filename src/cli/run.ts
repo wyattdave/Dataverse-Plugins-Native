@@ -5,6 +5,7 @@ import { openInBrowser } from './openBrowser.js';
 import { Auth } from '../studio/auth.js';
 import { DataverseClient } from '../studio/dataverse.js';
 import { defaultProfileStore } from '../studio/profileStore.js';
+import { runSkill, SKILL_HELP } from './skill.js';
 
 export interface CliIo {
   stdout: (text: string) => void;
@@ -20,13 +21,15 @@ export interface CliIo {
 export async function runCli(argv: readonly string[], io: CliIo): Promise<number> {
   const [command, ...rest] = argv;
   if (command === undefined || command === '--help' || command === 'help' || rest.includes('--help')) {
-    io.stdout(commandHelp(TOOL_NAME, command === 'help' ? rest[0] : command));
+    const subject = command === 'help' ? rest[0] : command;
+    io.stdout(subject === 'skill' ? SKILL_HELP : commandHelp(TOOL_NAME, subject));
     return 0;
   }
   if (command === '--version') {
     io.stdout(`${TOOL_NAME} ${TOOL_VERSION}\n`);
     return 0;
   }
+  if (command === 'skill') return runSkill(rest, io);
   if (command === 'ui') {
     const auth = io.auth ?? new Auth({ store: defaultProfileStore(), openUrl: openInBrowser });
     return runUi(rest, io, auth);
@@ -44,7 +47,9 @@ export async function runCli(argv: readonly string[], io: CliIo): Promise<number
     const dataverse = io.dataverse ?? new DataverseClient(auth);
     return runCommand(command, rest, { stdout: io.stdout, stderr: io.stderr, auth, dataverse });
   }
-  io.stderr(`Unknown command "${command}". Run ${TOOL_NAME} --help.\n`);
+  const message = `Unknown command "${command}". Run ${TOOL_NAME} --help.`;
+  if (argv.includes('--json')) io.stdout(`${JSON.stringify({ error: message })}\n`);
+  else io.stderr(`${message}\n`);
   return 3;
 }
 

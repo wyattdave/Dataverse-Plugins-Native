@@ -220,7 +220,7 @@ This template contains placeholders only; it is an adapter contract, not a known
 
 ## 6. CLI contract and mutation classifications
 
-Executable name `dv-native` is proposed; adapt to repository naming. Every command supports structured JSON output and explicit target/config inputs where relevant.
+Executable name `dataverse-plugins-native` is proposed; adapt to repository naming. Every command supports structured JSON output and explicit target/config inputs where relevant.
 Commands are introduced incrementally, not all implemented as working mutations in the first PR.
 
 | Command | First phase | Contract and side effects |
@@ -237,7 +237,7 @@ Commands are introduced incrementally, not all implemented as working mutations 
 | `recover` | 1 blocked stub; 2+ gated | Proposes or executes separately approved compensating configuration changes where proven; cannot undo emitted business effects. |
 | `retire` | 1 blocked stub; 5 gated | Proven deactivation/removal only; generic delete is disabled until the complete lifecycle is verified. |
 
-Suggested offline usage: `dv-native validate --spec calculation.json --offline --json`, then `dv-native plan --spec calculation.json --snapshot baseline.json --json`.
+Suggested offline usage: `dataverse-plugins-native validate --spec calculation.json --offline --json`, then `dataverse-plugins-native plan --spec calculation.json --snapshot baseline.json --json`.
 A snapshot MUST carry identity, acquisition time, completeness, projection version, and evidence fingerprints; offline planning cannot authorize a later write without fresh preflight reads.
 Phase 1 plans MUST declare `planState=draft`, `executionReadiness=blocked`, and `approvalEligible=false`; refuse approval when the operation's required protocol/host checks or preconditions are missing, not merely at dispatch.
 Unknown CLI options and invalid input are errors; no silent defaults to an environment, principal, destructive operation, or evaluation mode.

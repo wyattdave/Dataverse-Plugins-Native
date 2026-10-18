@@ -15,7 +15,7 @@ export const examplePath = (name: string): string => join(ROOT, 'examples', name
 export const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 export async function tempDir(): Promise<string> {
-  return mkdtemp(join(tmpdir(), 'dv-native-test-'));
+  return mkdtemp(join(tmpdir(), 'dataverse-plugins-native-test-'));
 }
 
 export interface CliRun {

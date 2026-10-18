@@ -1,27 +1,37 @@
 {
-  "name": "dv-native",
+  "name": "dataverse-plugins-native",
   "version": "0.1.0",
-  "private": true,
   "description": "Build and deploy Dataverse low-code plug-ins (instant Functions and automated plug-ins) from a CLI, an agent, or a local UI. Self-contained: no Power Platform CLI or app registration needed.",
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "author": "wyattdave",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wyattdave/LowCode-Plugins.git"
+  },
+  "homepage": "https://github.com/wyattdave/LowCode-Plugins#readme",
+  "bugs": "https://github.com/wyattdave/LowCode-Plugins/issues",
+  "keywords": ["dataverse", "power-fx", "power-platform", "low-code", "agent-skills", "copilot"],
   "type": "module",
   "engines": {
     "node": ">=22.12"
   },
   "bin": {
-    "dv-native": "dist/src/cli/main.js"
+    "dataverse-plugins-native": "dist/src/cli/main.js"
   },
   "files": [
     "dist/src",
     "ui",
-    "examples"
+    "examples",
+    ".github/skills/dataverse-plugins-native",
+    "docs"
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/prepare-skill.mjs",
+    "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test \"dist/tests/**/*.test.js\"",
-    "dv-native": "node dist/src/cli/main.js",
+    "dataverse-plugins-native": "node dist/src/cli/main.js",
     "ui": "npm run build && node dist/src/cli/main.js ui --open"
   },
   "devDependencies": {

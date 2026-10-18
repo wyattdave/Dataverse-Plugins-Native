@@ -9,7 +9,7 @@ export const LOGICAL_NAME_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 /** Microsoft-owned publisher prefixes. */
 const isReservedPrefix = (prefix: string): boolean => /^ms/.test(prefix) || prefix === 'adx';
 
-export const PLUGIN_SCHEMA_VERSION = 'dv-native.plugin/v1';
+export const PLUGIN_SCHEMA_VERSION = 'dataverse-plugins-native.plugin/v1';
 
 /** Custom API parameter type codes (documented Custom API `type` choice values). */
 export const PARAMETER_TYPE_CODES = {

@@ -124,8 +124,8 @@ function listenForRedirect(state: string): Promise<{ port: number; code: Promise
         'Referrer-Policy': 'no-referrer',
       });
       res.end(
-        `<!doctype html><meta charset="utf-8"><title>dv-native</title><p style="font:16px system-ui;margin:40px">${
-          ok ? 'Signed in. You can close this tab and return to dv-native.' : 'Sign-in did not complete. Return to dv-native for details.'
+        `<!doctype html><meta charset="utf-8"><title>dataverse-plugins-native</title><p style="font:16px system-ui;margin:40px">${
+          ok ? 'Signed in. You can close this tab and return to dataverse-plugins-native.' : 'Sign-in did not complete. Return to dataverse-plugins-native for details.'
         }</p>`,
       );
       finish(ok ? undefined : new Error(describeAadError({ error: error ?? 'no_code', error_description: params.get('error_description') ?? '' })), value);

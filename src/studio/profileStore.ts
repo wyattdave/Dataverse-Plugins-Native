@@ -131,7 +131,7 @@ export function fileProfileStore(path: string, protector: Protector): ProfileSto
 
 export function defaultProfileStore(): ProfileStore {
   const windows = process.platform === 'win32';
-  return fileProfileStore(join(homedir(), '.dv-native', windows ? 'profiles.dat' : 'profiles.json'), windows ? windowsDpapiProtector() : plainProtector);
+  return fileProfileStore(join(homedir(), '.dataverse-plugins-native', windows ? 'profiles.dat' : 'profiles.json'), windows ? windowsDpapiProtector() : plainProtector);
 }
 
 export function memoryProfileStore(initial: StoredProfiles = { activeId: undefined, profiles: [] }): ProfileStore & { data: StoredProfiles } {

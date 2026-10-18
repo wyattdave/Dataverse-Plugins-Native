@@ -1,0 +1,6 @@
+{
+  "package": "dataverse-plugins-native",
+  "version": "0.1.0",
+  "executable": "dataverse-plugins-native",
+  "fallback": "npx -y dataverse-plugins-native@0.1.0"
+}

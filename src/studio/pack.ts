@@ -3,7 +3,7 @@ import type { SolutionFiles } from './solution.js';
 
 /**
  * Packs an unpacked solution folder layout into an importable solution zip, the way SolutionPackager (`pac solution pack`)
- * does for the components dv-native generates: Other/Solution.xml → solution.xml, Other/Customizations.xml →
+ * does for the components dataverse-plugins-native generates: Other/Solution.xml → solution.xml, Other/Customizations.xml →
  * customizations.xml with SdkMessageProcessingSteps/*.xml inlined, [Content_Types].xml, and component folders unchanged.
  */
 

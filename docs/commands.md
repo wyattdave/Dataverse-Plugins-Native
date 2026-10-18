@@ -1,7 +1,10 @@
 # Command reference
 
-Executable: `dv-native` (`node dist/src/cli/main.js`). Every command except `ui` accepts `--json`: stdout is then
-exactly one JSON object, and errors are returned as `{ "error": "…" }`. `<command> --help` shows one command.
+Executable: `dataverse-plugins-native` after `npm install --global dataverse-plugins-native@0.1.0`, or use
+`npx -y dataverse-plugins-native@0.1.0 <command>` without a global install. For source development, build then run
+`npm run dataverse-plugins-native -- <command>`. Workflow and skill commands accept `--json`: stdout is then exactly one JSON object,
+and errors are returned as `{ "error": "…" }`. Help/version are text and `ui` does not accept `--json`.
+`<command> --help` shows one command. Only `ui` starts a persistent local server.
 
 | Step | Command | What it does | Exit |
 | --- | --- | --- | --- |
@@ -12,6 +15,18 @@ exactly one JSON object, and errors are returned as `{ "error": "…" }`. `<comm
 | 3 | `envs [--profile <username\|id>]` | Lists remembered profiles and the Dataverse environments (with type) from the Power Platform API. `--profile` switches the active profile. Signs in first if there is no profile. | 0 / 3 |
 | 4 | `deploy --spec <file> --environment <url\|name\|id> [--profile …]` | check → environment must be listed (exactly one match) → (automated) resolve message id and existing step via Web API FetchXML → build and pack the solution → `ImportSolutionAsync` + poll → maker portal link to the solution. | 0 / 2 blocked / 3 failed |
 | – | `ui [--port <n>] [--open]` | The same steps in a localhost-only browser UI. | 0 on stop |
+| – | `skill install [options]` | Copy all bundled skill assets; refuse existing installs unless `--backup` is explicit. | 0 / 3 |
+| – | `skill status [options]` | Exact destinations, state/version, changed/extra files, running CLI version and executable on PATH. | 0 / 3 |
+| – | `skill update [options]` | Use this CLI package's skill version; protect modifications, retain a full sibling backup. | 0 / 3 |
+| – | `skill uninstall [options]` | Remove unchanged managed files only; preserve unrelated content and backups. | 0 / 3 |
+| – | `--version` | Running package version. | 0 |
+| – | `--help`, `help <command>`, `<command> --help` | General or command-specific usage. | 0 |
+
+Skill options: `--target shared|codex|claude|vscode|opencode|all` (default `shared`),
+`--project <directory>` (explicit project scope), `--json`, and `--backup` (install/update only).
+Without project scope, destinations are under your home directory, not the current project.
+See [distribution](distribution.md) for paths, source documentation, backup/manifest behaviour and release instructions.
+`ui` port range is 0–65535; 0 (the default) chooses a free port. Startup errors return 3.
 
 `new` and `set` print the check result too, so mistakes show up immediately; they still exit `0` when the file was
 written.
@@ -36,7 +51,7 @@ pre-filled) and retry.
 
 Solution and publisher settings are applied before `--name`, so `--prefix` and `--name` can be combined in one call.
 
-## Spec: `dv-native.plugin/v1`
+## Spec: `dataverse-plugins-native.plugin/v1`
 
 | Field | Instant | Automated |
 | --- | --- | --- |
@@ -57,9 +72,9 @@ redeploy updates the same step.
 What deploy does **not** do: publish all customizations, activate other plug-ins/workflows, delete anything, or change
 environment settings. Import is unmanaged and additive.
 
-## Local UI API (`dv-native ui`)
+## Local UI API (`dataverse-plugins-native ui`)
 
-For the bundled UI only. Every endpoint requires the `X-DV-Session` header plus an allowed `Host`; errors are
+For the bundled UI only. Every endpoint requires the `X-Dataverse-Plugins-Native-Session` header plus an allowed `Host`; errors are
 `{ "error": "…" }`.
 
 | Endpoint | Purpose |

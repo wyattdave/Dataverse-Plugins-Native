@@ -42,11 +42,11 @@ describe('local UI server (fake sign-in and Dataverse)', () => {
   });
   after(async () => server.close());
 
-  const get = (path: string, headers: Record<string, string> = {}) => call(server.port, path, { headers: { 'X-DV-Session': token, ...headers } });
+  const get = (path: string, headers: Record<string, string> = {}) => call(server.port, path, { headers: { 'X-Dataverse-Plugins-Native-Session': token, ...headers } });
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     call(server.port, path, {
       method: 'POST',
-      headers: { 'X-DV-Session': token, 'Content-Type': 'application/json', ...headers },
+      headers: { 'X-Dataverse-Plugins-Native-Session': token, 'Content-Type': 'application/json', ...headers },
       body: typeof body === 'string' ? body : JSON.stringify(body),
     });
 
@@ -73,7 +73,7 @@ describe('local UI server (fake sign-in and Dataverse)', () => {
     assert.equal((await get('/api/studio/meta', { Host: `evil.example.com:${server.port}` })).status, 421);
     assert.equal((await get('/api/studio/meta', { Origin: 'https://evil.example.com' })).status, 403);
     assert.equal((await call(server.port, '/api/studio/meta')).status, 401);
-    assert.equal((await call(server.port, '/api/studio/environments', { headers: { 'X-DV-Session': '0'.repeat(64) } })).status, 401);
+    assert.equal((await call(server.port, '/api/studio/environments', { headers: { 'X-Dataverse-Plugins-Native-Session': '0'.repeat(64) } })).status, 401);
     assert.equal((await get('/api/studio/meta', { Origin: server.origin })).status, 200);
   });
 

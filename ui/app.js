@@ -1,7 +1,7 @@
-// dv-native UI: four steps — function, check, environment, deploy. No third-party code; talks only to this local server.
+// dataverse-plugins-native UI: four steps — function, check, environment, deploy. No third-party code; talks only to this local server.
 
-const sSessionKey = 'dvNativeSession';
-const sThemeKey = 'dvNativeTheme';
+const sSessionKey = 'dataversePluginsNativeSession';
+const sThemeKey = 'dataversePluginsNativeTheme';
 
 const eForm = document.getElementById('spec-form');
 const eFormula = document.getElementById('formula');
@@ -65,7 +65,7 @@ function getSessionToken() {
 const sSessionToken = getSessionToken();
 
 async function callApi(sPath, oBody) {
-  const oInit = { method: oBody === undefined ? 'GET' : 'POST', headers: { 'X-DV-Session': sSessionToken } };
+  const oInit = { method: oBody === undefined ? 'GET' : 'POST', headers: { 'X-Dataverse-Plugins-Native-Session': sSessionToken } };
   if (oBody !== undefined) {
     oInit.headers['Content-Type'] = 'application/json';
     oInit.body = JSON.stringify(oBody);
@@ -171,7 +171,7 @@ function readSpecFromForm() {
   const sKind = field('kind').value;
   const sOptionPrefix = field('publisherOptionValuePrefix').value.trim();
   const oSpec = {
-    schemaVersion: 'dv-native.plugin/v1',
+    schemaVersion: 'dataverse-plugins-native.plugin/v1',
     kind: sKind,
     uniqueName: field('uniqueName').value.trim(),
     displayName: field('displayName').value.trim(),
@@ -267,8 +267,8 @@ async function loadExample(sName) {
 function loadSpecText(sText) {
   try {
     const oSpec = JSON.parse(sText);
-    if (oSpec === null || typeof oSpec !== 'object' || oSpec.schemaVersion !== 'dv-native.plugin/v1') {
-      showLoadError('This file is not a dv-native.plugin/v1 spec.');
+    if (oSpec === null || typeof oSpec !== 'object' || oSpec.schemaVersion !== 'dataverse-plugins-native.plugin/v1') {
+      showLoadError('This file is not a dataverse-plugins-native.plugin/v1 spec.');
       return;
     }
     showLoadError('');
